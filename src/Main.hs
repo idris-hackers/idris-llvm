@@ -14,8 +14,6 @@ import LLVM.General.Target
 import System.Environment
 import System.Exit
 
-import Paths_idris
-
 data Opts = Opts { inputs :: [FilePath],
                    output :: FilePath,
                    oTargetTriple :: String,
