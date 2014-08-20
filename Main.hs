@@ -29,10 +29,10 @@ getOpts = do xs <- getArgs
 
 llvm_main :: Opts -> Idris ()
 llvm_main opts = do elabPrims
-                 loadInputs (inputs opts) Nothing
-                 mainProg <- elabMain
-                 ir <- compile (Via "llvm") (output opts) mainProg
-                 runIO $ codegenLLVM ir
+                    loadInputs (inputs opts) Nothing
+                    mainProg <- elabMain
+                    ir <- compile (Via "C") (output opts) mainProg
+                    runIO $ codegenLLVM ir
 
 main :: IO ()
 main = do opts <- getOpts
