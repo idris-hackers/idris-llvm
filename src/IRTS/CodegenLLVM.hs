@@ -1,14 +1,17 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE CPP #-}
 module IRTS.CodegenLLVM (codegenLLVM) where
 
 import IRTS.CodegenCommon
 import IRTS.Lang
 import IRTS.Simplified
-import IRTS.System
+-- import IRTS.System
 import qualified Idris.Core.TT as TT
 import Idris.Core.TT (ArithTy(..), IntTy(..), NativeTy(..), nativeTyWidth)
 
 import Util.System
+import Paths_idris_llvm
+import System.FilePath
 
 import LLVM.General.Context
 import LLVM.General.Diagnostic
@@ -57,6 +60,32 @@ import Debug.Trace
 
 data Target = Target { triple :: String, dataLayout :: DataLayout }
 
+-- These might want to live in a different file
+
+getCC :: IO String
+getCC = fromMaybe "gcc" <$> environment "IDRIS_CC"
+
+#if defined(FREEBSD) || defined(DRAGONFLY)
+extraLib = ["-L/usr/local/lib"]
+#else
+extraLib = []
+#endif
+
+getLibFlags = do dir <- getDataDir
+                 return $ extraLib
+
+getIdrisLibDir = do dir <- getDataDir
+                    return $ addTrailingPathSeparator dir
+
+#if defined(FREEBSD) || defined(DRAGONFLY)
+extraInclude = " -I/usr/local/include"
+#else
+extraInclude = ""
+#endif
+
+getIncFlags = do dir <- getDataDir
+                 return $ ["-I" ++ dir </> "rts", extraInclude]
+
 codegenLLVM :: CodeGenerator
 codegenLLVM ci = codegenLLVM' (simpleDecls ci) (targetTriple ci)
                               (targetCPU ci) (optimisation ci)
@@ -97,8 +126,9 @@ outputModule tm file Object m = failInIO $ MO.writeObjectToFile tm file m
 outputModule tm file Executable m = withTmpFile $ \obj -> do
   outputModule tm obj Object m
   cc <- getCC
-  defs <- (</> "llvm" </> "libidris_rts.a") <$> getDataDir
-  exit <- rawSystem cc [obj, defs, "-lm", "-lgmp", "-lgc", "-o", file]
+  libflags <- getLibFlags
+  defs <- (</> "libidris_rts.a") <$> getDataDir
+  exit <- rawSystem cc ([obj, defs] ++ libflags ++ ["-lm", "-lgmp", "-lgc", "-o", file])
   when (exit /= ExitSuccess) $ ierror "FAILURE: Linking"
 outputModule _ _ MavenProject _ = ierror "FAILURE: unsupported output type"
 
