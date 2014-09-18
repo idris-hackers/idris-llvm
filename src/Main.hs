@@ -5,6 +5,8 @@ import Idris.AbsSyntax
 import Idris.ElabDecls
 import Idris.REPL
 
+import Paths_idris_llvm
+
 import IRTS.Compiler
 import IRTS.CodegenLLVM
 import qualified IRTS.CodegenCommon as CG
@@ -44,6 +46,4 @@ main = do opts <- getOpts
           if (null (inputs opts)) 
              then showUsage
              else runMain (llvm_main opts)
-
-
 
