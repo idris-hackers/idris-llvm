@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+
+set -e
+
+git clone https://github.com/Idris-lang/Idris-dev.git
+cd Idris-dev
+cabal install -f FFI --enable-tests
+cd ..
+cabal install
+cd Idris-dev
+make test_llvm
+ 
+
