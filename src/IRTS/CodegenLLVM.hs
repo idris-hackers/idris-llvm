@@ -65,6 +65,7 @@ data Target = Target { triple :: String, dataLayout :: DataLayout }
 getCC :: IO String
 getCC = fromMaybe "gcc" <$> environment "IDRIS_CC"
 
+-- TODO These should probably be derived from the triple
 #if defined(FREEBSD) || defined(DRAGONFLY)
 extraLib = ["-L/usr/local/lib"]
 #else
@@ -85,6 +86,18 @@ extraInclude = ""
 
 getIncFlags = do dir <- getDataDir
                  return $ ["-I" ++ dir </> "rts", extraInclude]
+
+
+stdinName, stdoutName, stderrName :: Target -> String
+#if defined(FREEBSD) || defined(DRAGONFLY) || defined(MACOSX)
+stdinName _ = "__stdinp"
+stdoutName _ = "__stdoutp"
+stderrName _ = "__stderrp"
+#else
+stdinName _ = "stdin"
+stdoutName _ = "stdout"
+stderrName _ = "stderr"
+#endif
 
 codegenLLVM :: CodeGenerator
 codegenLLVM ci = codegenLLVM' (simpleDecls ci) (targetTriple ci)
@@ -268,6 +281,7 @@ initDefs tgt =
     , exfun "__idris_gmpFree" VoidType [ptrI8, intPtr] False
     , exfun "__idris_strRev" ptrI8 [ptrI8] False
     , exfun "strtoll" (IntegerType 64) [ptrI8, PointerType ptrI8 (AddrSpace 0), IntegerType 32] False
+    , exfun "strtod" (FloatingPointType 64 IEEE) [ptrI8, PointerType ptrI8 (AddrSpace 0)] False
     , exfun "putErr" VoidType [ptrI8] False
     , exVar (stdinName tgt) ptrI8
     , exVar (stdoutName tgt) ptrI8
@@ -302,17 +316,6 @@ initDefs tgt =
                                }
       exVar :: String -> Type -> Definition
       exVar name ty = GlobalDefinition $ globalVariableDefaults { G.name = Name name, G.type' = ty }
-
-isApple :: Target -> Bool
-isApple (Target { triple = t }) = isJust . stripPrefix "-apple" $ dropWhile (/= '-') t
-
-stdinName, stdoutName, stderrName :: Target -> String
-stdinName t | isApple t = "__stdinp"
-stdinName _ = "stdin"
-stdoutName t | isApple t = "__stdoutp"
-stdoutName _ = "stdout"
-stderrName t | isApple t = "__stderrp"
-stderrName _ = "stderr"
 
 getStdIn, getStdOut, getStdErr :: Codegen Operand
 getStdIn  = ConstantOperand . C.GlobalReference . Name . stdinName <$> asks target
@@ -1044,6 +1047,9 @@ cgOp LFATan  [x] = nunary ATFloat "atan" x
 cgOp LFSqrt  [x] = nunary ATFloat "llvm.sqrt.f64" x
 cgOp LFFloor [x] = nunary ATFloat "llvm.floor.f64" x
 cgOp LFCeil  [x] = nunary ATFloat "llvm.ceil.f64" x
+cgOp LFNegate [x] = do
+	z <- box (FArith ATFloat) (ConstantOperand $ C.Float $ F.Double (-0.0))	
+	binary ATFloat z x FSub
 
 cgOp (LIntFloat ITBig) [x] = do
   x' <- unbox (FArith (ATInt ITBig)) x
@@ -1071,6 +1077,14 @@ cgOp LFloatStr [x] = do
     x' <- unbox (FArith ATFloat) x
     ustr <- inst (idrCall "__idris_floatStr" [x'])
     box FString ustr 
+
+cgOp LStrFloat [s] = do
+  ns <- unbox FString s
+  nx <- inst $ simpleCall "strtod"
+        [ns
+        , ConstantOperand $ C.Null (PointerType (PointerType (IntegerType 8) (AddrSpace 0)) (AddrSpace 0))
+        ]
+  box (FArith ATFloat) nx
 
 cgOp LNoOp xs = return $ last xs
 
