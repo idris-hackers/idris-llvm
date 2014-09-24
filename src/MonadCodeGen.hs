@@ -1,10 +1,12 @@
-{-# LANGUAGE GeneralizedNewtypeDeriving, RecordWildCards, StandaloneDeriving #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving, RecordWildCards #-}
 module MonadCodeGen
-       ( Target
-       , MonadCodeGen
-       , ModuleGenT, ModuleGen
-       , FunctionGenT, FunctionGen
-       , genFunction, genGlobal
+       ( Target(..)
+       , MonadModuleGen, ModuleGen
+       , getMGS, putMGS, askTarget
+       , MonadFunctionGen, FunctionGen
+       , getFGS, putFGS, tellFGO
+      , runModuleGen, runFunctionGen, addFunction, addGlobal, addType
+       , findGlobal
        , getLocalName
        , startBlock, endBlock
        , inst, inst'
@@ -17,139 +19,165 @@ import LLVM.General.AST.DataLayout
 
 import qualified LLVM.General.AST.Global as G
 import qualified LLVM.General.AST.Constant as C
+import qualified LLVM.General.AST.Attribute as A
 
 import Control.Applicative
 import Control.Monad.Reader
 import Control.Monad.Writer
 import Control.Monad.State
-import Control.Monad.Identity
-import Data.Maybe
 import Data.Map (Map)
 import Data.Word
 import qualified Data.Map as M
 
 data Target = Target { triple :: String, dataLayout :: DataLayout }
 
-class MonadCodeGen g where
-  getMGS :: Monad m => g m ModuleGenState
-  putMGS :: Monad m => ModuleGenState -> g m ()
-  liftMG :: Monad m => ModuleGenT m a -> g m a
-  modifyMGS :: (Monad m, Monad (g m)) => (ModuleGenState -> ModuleGenState) -> g m ()
-  modifyMGS f = getMGS >>= putMGS . f
-  getsMGS :: (Monad m, Monad (g m)) => (ModuleGenState -> a) -> g m a
+class Monad m => MonadModuleGen m where
+  getMGS :: m ModuleGenState
+  putMGS :: ModuleGenState -> m ()
+  askTarget :: m Target
+  getsMGS :: (ModuleGenState -> a) -> m a
   getsMGS f = getMGS >>= return . f
+  modifyMGS :: (ModuleGenState -> ModuleGenState) -> m ()
+  modifyMGS f = getMGS >>= putMGS . f
 
-data ModuleGenState = ModuleGenState { nextGlobalName :: Word
-                                     , definitions :: Map String Definition
+class MonadModuleGen m => MonadFunctionGen m where
+  getFGS :: m FunctionGenState
+  putFGS :: FunctionGenState -> m ()
+  tellFGO :: FunctionGenOutput -> m ()
+  getsFGS :: (FunctionGenState -> a) -> m a
+  getsFGS f = getFGS >>= return . f
+  modifyFGS :: (FunctionGenState -> FunctionGenState) -> m ()
+  modifyFGS f = getFGS >>= putFGS . f
+
+data ModuleGenState = ModuleGenState { definitions :: Map Name Definition
                                      , globalNames :: Map String Word
                                      }
 
-initialModuleGenState = ModuleGenState { nextGlobalName = 0
-                                       , definitions = M.empty
+initialModuleGenState = ModuleGenState { definitions = M.empty
                                        , globalNames = M.empty
                                        }
 
-newtype ModuleGenT m a = MG (ReaderT Target (StateT ModuleGenState m) a)
+newtype ModuleGen a = MG { unMG :: ReaderT Target (State ModuleGenState) a }
   deriving (Functor, Applicative, Monad, MonadReader Target, MonadState ModuleGenState)
 
-instance MonadTrans ModuleGenT where
-  lift x = MG (lift (lift x))
-
-instance MonadCodeGen ModuleGenT where
+instance MonadModuleGen ModuleGen where
   getMGS = get
   putMGS = put
-  liftMG = id
+  askTarget = ask
 
-type ModuleGen = ModuleGenT Identity
-
-data FunctionGenState = FunctionGenState { nextLocalName :: Word
-                                         , currentBlockName :: Name
+data FunctionGenState = FunctionGenState { currentBlockName :: Name
                                          , currentBlockInstructions :: [Named Instruction]
                                          , localNames :: Map String Word
                                          }
 
-initialFunctionGenState = FunctionGenState { nextLocalName = 0
-                                           , currentBlockName = Name "entry"
+initialFunctionGenState = FunctionGenState { currentBlockName = error "no block"
                                            , currentBlockInstructions = []
                                            , localNames = M.singleton "entry" 0
                                            }
 
-data FunctionGenOutput = FunctionGenOutput { allocas :: [(Name, Type)], blocks :: [BasicBlock] }
+data FunctionGenOutput = FunctionGenOutput { allocas :: [(Name, Instruction)], blocks :: [BasicBlock] }
 
 instance Monoid FunctionGenOutput where
   mempty = FunctionGenOutput mempty mempty
   mappend (FunctionGenOutput a b) (FunctionGenOutput a' b') = FunctionGenOutput (a `mappend` a') (b `mappend` b')
 
-newtype FunctionGenT m a = CG (WriterT FunctionGenOutput (StateT FunctionGenState (ModuleGenT m)) a)
+newtype FunctionGen a = FG (WriterT FunctionGenOutput (StateT FunctionGenState ModuleGen) a)
   deriving (Functor, Applicative, Monad, MonadReader Target, MonadWriter FunctionGenOutput, MonadState FunctionGenState)
 
-instance MonadTrans FunctionGenT where
-  lift x = (liftMG (lift x))
+liftMG :: ModuleGen a -> FunctionGen a
+liftMG = FG . lift . lift
 
-instance MonadCodeGen FunctionGenT where
+instance MonadModuleGen FunctionGen where
   getMGS = liftMG get
   putMGS = liftMG . put
-  liftMG x = CG (lift (lift x))
+  askTarget = liftMG ask
 
-type FunctionGen = FunctionGenT Identity
+instance MonadFunctionGen FunctionGen where
+  getFGS = get
+  putFGS = put
+  tellFGO = tell
 
-genModule :: Monad m => String -> ModuleGenT m () -> Target -> m Module
-genModule name (MG mg) target = do
-  ((), ModuleGenState {..}) <- runStateT (runReaderT mg target) initialModuleGenState
-  return $ Module name (Just . dataLayout $ target) (Just . triple $ target) (map snd (M.toList definitions))
+runModuleGen :: String -> ModuleGen a -> Target -> Module
+runModuleGen name (MG mg) target =
+  let (_, ModuleGenState {..}) = runState (runReaderT mg target) initialModuleGenState
+  in Module name (Just . dataLayout $ target) (Just . triple $ target) (map snd (M.toList definitions))
 
-genFunction :: (MonadCodeGen n, Monad m, Monad (n m)) => String -> Global -> FunctionGenT m a -> n m C.Constant
-genFunction desiredName opts (CG cg) = do
-  ((_, FunctionGenOutput {..}), _) <- liftMG . runStateT (runWriterT cg) $ initialFunctionGenState
-  name@(Name str) <- getGlobalName desiredName
-  let def = GlobalDefinition (opts { G.name = name, G.basicBlocks = blocks })
+runFunctionGen :: MonadModuleGen m =>
+                  String -> Type -> [(String, Type, [A.ParameterAttribute])] -> Bool -> Global ->
+                  ([Operand] -> FunctionGen a) ->
+                  m Global
+runFunctionGen desiredName rty args vararg opts functionGen = do
+  let (FG gen) = do params <- forM args $ \(n, t, a) -> do
+                                            ln <- getLocalName n
+                                            return $ Parameter t ln a
+                    functionGen (map (\(Parameter t ln a) -> (LocalReference t ln)) params)
+                    return params
+  target <- askTarget
+  initMGS <- getMGS
+  let (((params, FunctionGenOutput {..}), _), outMGS) = runState (runReaderT (unMG $ runStateT (runWriterT gen) $ initialFunctionGenState) target) initMGS
+  putMGS outMGS
+  name <- getGlobalName desiredName
+  let blocks' = case blocks of
+                  [] -> []
+                  (BasicBlock name instrs term):xs ->
+                    (BasicBlock name (map (uncurry (:=)) (reverse allocas) ++ instrs) term):xs
+      global = opts { G.name = name, G.basicBlocks = blocks', G.parameters = (params, vararg), G.returnType = rty }
       (params, varargs) = G.parameters opts
-  modifyMGS $ \s -> s { definitions = M.insert str def (definitions s) }
+  modifyMGS $ \s -> s { definitions = M.insert name (GlobalDefinition global) (definitions s) }
+  return global
+
+addFunction :: MonadModuleGen m => String -> Type -> [(String, Type, [A.ParameterAttribute])] -> Bool -> Global -> m Global
+addFunction n r a v o = runFunctionGen n r a v o (const (return ()))
+
+addType :: MonadModuleGen m => String -> Type -> m Type
+addType desiredName ty = do
+  name <- getGlobalName desiredName
+  modifyMGS $ \s -> s { definitions = M.insert name (TypeDefinition name (Just ty)) (definitions s) }
+  return (NamedTypeReference name)
+
+addGlobal :: MonadModuleGen m => String -> Global -> m C.Constant
+addGlobal desiredName opts = do
+  name <- getGlobalName desiredName
+  modifyMGS $ \s -> s { definitions = M.insert name (GlobalDefinition (opts { G.name = name })) (definitions s) }
   return (C.GlobalReference (typeOf opts) name)
 
-genGlobal :: (MonadCodeGen n, Monad m, Monad (n m)) => String -> Global -> n m C.Constant
-genGlobal desiredName opts = do
-  name@(Name str) <- getGlobalName desiredName
-  modifyMGS $ \s -> s { definitions = M.insert str (GlobalDefinition (opts { G.name = name })) (definitions s) }
-  return (C.GlobalReference (typeOf opts) name)
+findGlobal :: MonadModuleGen m => Name -> m (Maybe Global)
+findGlobal name = getsMGS $ \s -> case (M.lookup name (definitions s)) of
+                                    Just (GlobalDefinition g) -> Just g
+                                    _ -> Nothing
 
-getLocalName :: Monad m => String -> FunctionGenT m Name
-getLocalName n = do names <- gets localNames
+smartName :: String -> Word -> Name
+smartName "" i = UnName i
+smartName n i = Name (n ++ show i)
+
+getLocalName :: MonadFunctionGen m => String -> m Name
+getLocalName n = do names <- getsFGS localNames
                     case M.lookup n names of
-                      Nothing -> modify (\s -> s { localNames = M.insert n 0 names }) >> return (Name n)
-                      Just i -> modify (\s -> s { localNames = M.insert n (succ i) names }) >> return (Name $ n ++ show i)
+                      Nothing -> modifyFGS (\s -> s { localNames = M.insert n 0 names }) >> return (smartName n 0)
+                      Just i -> modifyFGS (\s -> s { localNames = M.insert n (succ i) names }) >> return (smartName n i)
 
-getGlobalName :: (MonadCodeGen n, Monad m, Monad (n m)) => String -> n m Name
-getGlobalName n = do names <- liftMG $ gets globalNames
+getGlobalName :: MonadModuleGen m => String -> m Name
+getGlobalName n = do names <- getsMGS globalNames
                      case M.lookup n names of
-                       Nothing -> modifyMGS (\s -> s { globalNames = M.insert n 0 names }) >> return (Name n)
-                       Just i -> modifyMGS (\s -> s { globalNames = M.insert n (succ i) names }) >> return (Name $ n ++ show i)
+                       Nothing -> modifyMGS (\s -> s { globalNames = M.insert n 0 names }) >> return (smartName n 0)
+                       Just i -> modifyMGS (\s -> s { globalNames = M.insert n (succ i) names }) >> return (smartName n i)
 
-getLocalUnName :: Monad m => FunctionGenT m Name
-getLocalUnName = do { i <- gets nextLocalName; modify (\s -> s { nextLocalName = succ i }); return (UnName i) }
+inst :: MonadFunctionGen m => Instruction -> m Operand
+inst = inst' ""
 
-getGlobalUnName :: (MonadCodeGen n, Monad m, Monad (n m)) => n m Name
-getGlobalUnName = do { i <- getsMGS nextGlobalName; modifyMGS (\s -> s { nextGlobalName = succ i }); return (UnName i) }
-
-inst :: Monad m => Instruction -> FunctionGenT m Operand
-inst i = do
-  n <- getLocalUnName
-  modify $ \s -> s { currentBlockInstructions = currentBlockInstructions s ++ [n := i] }
-  return $ LocalReference undefined n
-
-inst' :: Monad m => String -> Instruction -> FunctionGenT m Operand
+inst' :: MonadFunctionGen m => String -> Instruction -> m Operand
 inst' n i = do
   n <- getLocalName n
-  modify $ \s -> s { currentBlockInstructions = currentBlockInstructions s ++ [n := i] }
+  modifyFGS $ \s -> s { currentBlockInstructions = currentBlockInstructions s ++ [n := i] }
   return $ LocalReference undefined n
 
-startBlock :: Monad m => Name -> FunctionGenT m ()
-startBlock n = modify $ \s -> s { currentBlockName = n, currentBlockInstructions = [] }
+startBlock :: MonadFunctionGen m => Name -> m ()
+startBlock n = modifyFGS $ \s -> s { currentBlockName = n, currentBlockInstructions = [] }
 
-endBlock :: Monad m => Terminator -> FunctionGenT m ()
+endBlock :: MonadFunctionGen m => Terminator -> m ()
 endBlock t = do
-  FunctionGenState {..} <- get
-  tell (mempty { blocks = [BasicBlock currentBlockName currentBlockInstructions (Do t)] })
-  modify $ \s -> s { currentBlockName = error "attempted to access current block name after terminate"
-                   , currentBlockInstructions = error "attempted to access current block instructions after terminate"
-                   }
+  FunctionGenState {..} <- getFGS
+  tellFGO (mempty { blocks = [BasicBlock currentBlockName currentBlockInstructions (Do t)] })
+  modifyFGS $ \s -> s { currentBlockName = error "attempted to access current block name after terminate"
+                      , currentBlockInstructions = error "attempted to access current block instructions after terminate"
+                      }
