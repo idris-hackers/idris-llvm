@@ -99,9 +99,13 @@ stdoutName _ = "stdout"
 stderrName _ = "stderr"
 #endif
 
+-- FIXME: 'optimisation' is no longer a field in CodeGenerator, because
+-- optimisation levels at the idris command line are meant to
+-- indicate idris optimisation levels, not levels to pass through to
+-- back ends. We may need a way to pass back end specific options through.
 codegenLLVM :: CodeGenerator
 codegenLLVM ci = codegenLLVM' (simpleDecls ci) (targetTriple ci)
-                              (targetCPU ci) (optimisation ci)
+                              (targetCPU ci) 2
                               (outputFile ci) (outputType ci)
 
 codegenLLVM' :: [(TT.Name, SDecl)] ->
