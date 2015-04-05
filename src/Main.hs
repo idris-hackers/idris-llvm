@@ -23,7 +23,7 @@ import Paths_idris_llvm
 
 import IRTS.Compiler
 import IRTS.CodegenCommon
-import IRTS.System
+import IRTS.System (getCC)
 
 import Util.System
 
