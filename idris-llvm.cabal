@@ -3,12 +3,11 @@ Version:        0.0.0.1
 License:        BSD3
 License-file:   LICENSE
 Author:         Benjamin Saunders
-Maintainer:	Markus Pfeiffer <mp397@st-andrews.ac.uk>
-Build-Type:	Custom
+Maintainer:     Markus Pfeiffer <markus.pfeiffer@st-andrews.ac.uk>
+Build-Type:     Simple
 Cabal-Version:  >= 1.8
-Extra-source-files:
-		llvm/Makefile
-		llvm/*.c
+Extra-source-files: llvm/Makefile
+                  , llvm/*.c
 
 Executable idris-llvm
   Main-is:        Main.hs
@@ -24,10 +23,10 @@ Executable idris-llvm
                 , process
                 , transformers
                 , vector
-                , llvm-general == 3.3.8.*
-                , llvm-general-pure == 3.3.8.*
+                , llvm-general == 3.4.5.*
+                , llvm-general-pure == 3.4.5.*
 
-  other-modules: IRTS.CodegenLLVM
+  other-modules: Util, MonadCodeGen, Common, CodeGen, Operators, Constants
   cpp-options:   -DIDRIS_LLVM
 
   if os(linux)
@@ -47,5 +46,4 @@ Executable idris-llvm
      build-depends: Win32 < 2.4
 
   ghc-prof-options: -auto-all -caf-all
-  ghc-options:      -threaded -rtsopts -funbox-strict-fields
-
+  ghc-options:      -threaded -rtsopts -funbox-strict-fields -Wall
