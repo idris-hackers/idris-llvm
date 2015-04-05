@@ -23,8 +23,8 @@ Executable idris-llvm
                 , process
                 , transformers
                 , vector
-                , llvm-general == 3.4.4.*
-                , llvm-general-pure == 3.4.4.*
+                , llvm-general == 3.4.5.*
+                , llvm-general-pure == 3.4.5.*
 
   other-modules: Util, MonadCodeGen, Common, CodeGen, Operators, Constants
   cpp-options:   -DIDRIS_LLVM

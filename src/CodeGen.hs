@@ -7,7 +7,7 @@ import Data.Word
 import Data.Maybe
 
 import IRTS.Simplified
-import IRTS.Lang (LVar(..), FLang(..), FType(..))
+import IRTS.Lang (LVar(..), FType(..))
 
 import qualified Idris.Core.TT as TT
 
@@ -64,9 +64,9 @@ compile (SProj valueVar fieldIndex) = do
       argPtr <- inst $ GetElementPtr True valuePtr (map (ConstantOperand . C.Int 32) [0, 1, fromIntegral fieldIndex]) []
       Just <$> inst (Load False argPtr Nothing 0 [])
 compile (SConst c) = Just <$> compileConst c
-compile (SForeign LANG_C rty name args) = do
-  fn <- ensureCDecl name rty (map fst args)
-  sequence <$> mapM lookupVar (map snd args) >>= maybe (pure Nothing) (fmap Just . call fn)
+-- compile (SForeign LANG_C rty name args) = do
+--   fn <- ensureCDecl name rty (map fst args)
+--   sequence <$> mapM lookupVar (map snd args) >>= maybe (pure Nothing) (fmap Just . call fn)
 compile (SOp op args) = sequence <$> mapM lookupVar args >>= maybe (pure Nothing) (fmap Just . compileOp op)
 
 ensureCDecl :: String -> FType -> [FType] -> CodeGen Global

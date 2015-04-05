@@ -172,8 +172,6 @@ ftyToNativeTy :: FType -> Type
 ftyToNativeTy (FArith (TT.ATInt TT.ITNative)) = i32
 ftyToNativeTy (FArith (TT.ATInt TT.ITBig)) = ptr bigIntTy
 ftyToNativeTy (FArith (TT.ATInt (TT.ITFixed ty))) = IntegerType (fromIntegral $ TT.nativeTyWidth ty)
-ftyToNativeTy (FArith (TT.ATInt (TT.ITVec e c)))
-    = VectorType (fromIntegral c) (IntegerType (fromIntegral $ TT.nativeTyWidth e))
 ftyToNativeTy (FArith (TT.ATInt TT.ITChar)) = i32
 ftyToNativeTy (FArith TT.ATFloat) = double
 ftyToNativeTy FString = ptr i8

@@ -4,6 +4,7 @@ module Main where
 import Control.Applicative
 import Control.Monad
 import Control.Monad.Error
+import Control.Monad.Except
 
 import qualified Data.Set as S
 
@@ -59,7 +60,7 @@ llvm_main :: Opts -> Idris ()
 llvm_main opts = do elabPrims
                     loadInputs (inputs opts) Nothing
                     mainProg <- elabMain
-                    ir <- compile (Via "llvm") (output opts) mainProg
+                    ir <- compile (Via "llvm") (output opts) (Just mainProg)
                     runIO $ compileAndOutputModule ir
 
 main :: IO ()
@@ -77,11 +78,12 @@ compileAndOutputModule (CodegenInfo {..}) =
   withTargetMachine target targetTriple targetCPU S.empty options R.Default CM.Default CGO.Default $ \targetMachine -> do
   layout <- getTargetMachineDataLayout targetMachine
   failInIO $ MO.withModuleFromAST context (runModuleGen outputFile (generateCode simpleDecls) (Target targetTriple layout)) $ \m -> do
-  let opts = PM.defaultCuratedPassSetSpec { PM.optLevel = Just optimisation
+  let opts = PM.defaultCuratedPassSetSpec { PM.optLevel = Just 2 -- TODO optimisation
                                           , PM.simplifyLibCalls = Just True
                                           , PM.useInlinerWithThreshold = Just 225
                                           }
-  when (optimisation /= 0) $ PM.withPassManager opts $ void . flip PM.runPassManager m
+  -- when(optimisation /= 0) $ 
+  PM.withPassManager opts $ void . flip PM.runPassManager m
   outputModule targetMachine (MO.File outputFile) outputType m
 
 outputModule :: TargetMachine -> MO.File -> OutputType -> MO.Module -> IO ()
@@ -103,8 +105,8 @@ withTmpFile f = do
   removeFile path
   return result
 
-failInIO :: ErrorT String IO a -> IO a
-failInIO = either fail return <=< runErrorT
+failInIO :: ExceptT String IO a -> IO a
+failInIO = either fail return <=< runExceptT
 
 ierror :: String -> a
 ierror msg = error $ "INTERNAL ERROR: Main: " ++ msg
