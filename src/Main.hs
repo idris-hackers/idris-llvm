@@ -51,7 +51,9 @@ showUsage = do putStrLn "Usage: idris-llvm <ibc-files> [-o <output-file>]"
 getOpts :: IO Opts
 getOpts = do xs <- getArgs
              triple <- getDefaultTargetTriple
+             print triple
              cpu <- getHostCPUName
+             print cpu
              return $ helper (Opts [] "a.out" triple cpu) xs
   where
     helper opts ("-o":o:xs) = helper (opts { output = o }) xs
@@ -64,6 +66,7 @@ llvm_main opts = do elabPrims
                     mainProg <- elabMain
                     ir <- compile (Via "llvm") (output opts) (Just mainProg)
                     runIO $ compileAndOutputModule ir
+                    return ()
 
 main :: IO ()
 main = do opts <- getOpts
@@ -74,18 +77,30 @@ main = do opts <- getOpts
 compileAndOutputModule :: CodeGenerator
 compileAndOutputModule (CodegenInfo {..}) =
   withContext $ \context -> do
+  defTT <- getDefaultTargetTriple
+  defCPU <- getHostCPUName
+  print "bla"
   initializeAllTargets
-  (target, _) <- failInIO $ lookupTarget Nothing targetTriple
+  print "bla2"
+  (target, str) <- failInIO $ lookupTarget Nothing defTT
+  print ("bla3: " ++ str)
   withTargetOptions $ \options -> do
-  withTargetMachine target targetTriple targetCPU S.empty options R.Default CM.Default CGO.Default $ \targetMachine -> do
+  print "bla4"
+  withTargetMachine target defTT defCPU S.empty options R.Default CM.Default CGO.Default $ \targetMachine -> do
+  print "bla5" 
+  print ((targetTriple))
   layout <- getTargetMachineDataLayout targetMachine
+  print "bla6"
   failInIO $ MO.withModuleFromAST context (runModuleGen outputFile (generateCode simpleDecls) (Target targetTriple layout)) $ \m -> do
+  print "bla7"
   let opts = PM.defaultCuratedPassSetSpec { PM.optLevel = Just 2 -- TODO optimisation
                                           , PM.simplifyLibCalls = Just True
                                           , PM.useInlinerWithThreshold = Just 225
                                           }
   -- when(optimisation /= 0) $ 
+  print "bla8"
   PM.withPassManager opts $ void . flip PM.runPassManager m
+  print "bla9"
   outputModule targetMachine (MO.File outputFile) outputType m
 
 outputModule :: TargetMachine -> MO.File -> OutputType -> MO.Module -> IO ()
