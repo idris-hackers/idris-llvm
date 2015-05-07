@@ -10,7 +10,8 @@ module Common ( CodeGen, runCodeGen
               , isUnboxed
               , targetWordSize, getWordSize
               , ftyToNativeTy
---              , foreignToIdris, idrisToForeign
+              , nullValue
+              , foreignToIdris, idrisToForeign
               ) where
 
 import Control.Applicative
@@ -179,22 +180,23 @@ ftyToNativeTy FUnit = VoidType
 ftyToNativeTy FPtr = ptr i8
 ftyToNativeTy FAny = valueTy
 
--- foreignToIdris :: FType -> Operand -> Codegen Operand
--- foreignToIdris FUnit _ = return $ ConstantOperand nullValue
--- foreignToIdris fty fval = do
---   let ty = primTy (ftyToTy fty)
---   val <- if isHeapFTy fty then alloc ty else allocAtomic ty
---   tagptr <- inst $ GetElementPtr True val [ConstantOperand (C.Int 32 0), ConstantOperand (C.Int 32 0)] []
---   valptr <- inst $ GetElementPtr True val [ConstantOperand (C.Int 32 0), ConstantOperand (C.Int 32 1)] []
---   inst' $ Store False tagptr (ConstantOperand (C.Int 32 (-1))) Nothing 0 []
---   inst' $ Store False valptr fval Nothing 0 []
---   ptrI8 <- inst $ BitCast val (PointerType (IntegerType 8) (AddrSpace 0)) []
---   inst' $ simpleCall "llvm.invariant.start" [ConstantOperand $ C.Int 64 (-1), ptrI8]
---   inst $ BitCast val (PointerType valueType (AddrSpace 0)) []
+foreignToIdris :: FType -> Operand -> CodeGen Operand
+foreignToIdris FUnit _ = return $ ConstantOperand nullValue
+foreignToIdris fty fval = do
+  let ty = primitiveTy (ftyToNativeTy fty)
+  val <- gcAllocValue ty
+ -- if isHeapFTy fty then alloc ty else allocAtomic ty
+  tagptr <- inst $ GetElementPtr True val [ConstantOperand (C.Int 32 0), ConstantOperand (C.Int 32 0)] []
+  valptr <- inst $ GetElementPtr True val [ConstantOperand (C.Int 32 0), ConstantOperand (C.Int 32 1)] []
+  inst $ Store False tagptr (ConstantOperand (C.Int 32 (-1))) Nothing 0 []
+  inst $ Store False valptr fval Nothing 0 []
+  ptrI8 <- inst $ BitCast val (PointerType (IntegerType 8) (AddrSpace 0)) []
+  call' "llvm.invariant.start" [ConstantOperand $ C.Int 64 (-1), ptrI8]
+  inst $ BitCast val (PointerType valueTy (AddrSpace 0)) []
 
--- idrisToForeign :: FType -> Operand -> Codegen Operand
--- idrisToForeign FUnit x = return x
--- idrisToForeign fty bval = do
---   val <- inst $ BitCast bval (PointerType (primTy (ftyToTy fty)) (AddrSpace 0)) []
---   fvalptr <- inst $ GetElementPtr True val [ConstantOperand (C.Int 32 0), ConstantOperand (C.Int 32 1)] []
---   inst $ Load False fvalptr Nothing 0 []
+idrisToForeign :: FType -> Operand -> CodeGen Operand
+idrisToForeign FUnit x = return x
+idrisToForeign fty bval = do
+  val <- inst $ BitCast bval (PointerType (primitiveTy (ftyToNativeTy fty)) (AddrSpace 0)) []
+  fvalptr <- inst $ GetElementPtr True val [ConstantOperand (C.Int 32 0), ConstantOperand (C.Int 32 1)] []
+  inst $ Load False fvalptr Nothing 0 []

@@ -88,10 +88,13 @@ compileAndOutputModule (CodegenInfo {..}) =
   print "bla4"
   withTargetMachine target defTT defCPU S.empty options R.Default CM.Default CGO.Default $ \targetMachine -> do
   print "bla5" 
-  print ((targetTriple))
   layout <- getTargetMachineDataLayout targetMachine
   print "bla6"
-  failInIO $ MO.withModuleFromAST context (runModuleGen outputFile (generateCode simpleDecls) (Target targetTriple layout)) $ \m -> do
+  print outputFile
+  print simpleDecls
+  print layout
+  print defTT
+  failInIO $ MO.withModuleFromAST context (runModuleGen outputFile (generateCode simpleDecls) (Target defTT layout)) $ \m -> do
   print "bla7"
   let opts = PM.defaultCuratedPassSetSpec { PM.optLevel = Just 2 -- TODO optimisation
                                           , PM.simplifyLibCalls = Just True

@@ -56,6 +56,8 @@ compile (SCon _ tag name argVars) = do
         argPtr <- inst $ GetElementPtr True valuePtr (map (ConstantOperand . C.Int 32) [0, 1, i]) []
         inst $ Store False argPtr arg Nothing 0 []
       Just <$> inst (BitCast valuePtr (ptr valueTy) [])
+compile (SCase ty (Loc level) alts) = return Nothing
+compile (SChkCase (Loc level) alts) = return Nothing
 compile (SProj valueVar fieldIndex) = do
   x <- lookupVar valueVar
   case x of
@@ -64,12 +66,14 @@ compile (SProj valueVar fieldIndex) = do
       argPtr <- inst $ GetElementPtr True valuePtr (map (ConstantOperand . C.Int 32) [0, 1, fromIntegral fieldIndex]) []
       Just <$> inst (Load False argPtr Nothing 0 [])
 compile (SConst c) = Just <$> compileConst c
-compile (SForeign _ _ _) = return Nothing
+-- compile (SForeign LANG_C rty name args) = do
 --   fn <- ensureCDecl name rty (map fst args)
 --   sequence <$> mapM lookupVar (map snd args) >>= maybe (pure Nothing) (fmap Just . call fn)
 compile (SOp op args) = sequence <$> mapM lookupVar args >>= maybe (pure Nothing) (fmap Just . compileOp op)
-compile (SError s) =
--
+compile SNothing = return Nothing
+compile x = ierror ("Non implemented SExp: " ++ (show x))
+--balarrpr" -- return Nothing -- Todo: Meaningful error message
+
 ensureCDecl :: String -> FType -> [FType] -> CodeGen Global
 ensureCDecl name rty args = do
   existing <- findGlobal (Name name)
