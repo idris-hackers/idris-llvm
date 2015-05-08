@@ -12,6 +12,7 @@ module Common ( CodeGen, runCodeGen
               , ftyToNativeTy
               , nullValue
               , foreignToIdris, idrisToForeign
+              , ierror
               ) where
 
 import Control.Applicative
