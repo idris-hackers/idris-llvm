@@ -24,7 +24,6 @@ Executable idris-llvm
                 , process
                 , transformers
                 , vector
-                , llvm-general == 3.3.8.*
                 , llvm-general-pure == 3.3.8.*
 
   other-modules: IRTS.CodegenLLVM

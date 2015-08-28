@@ -1,7 +1,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <gmp.h>
-#include <gc.h>
+#include <gc/gc.h>
 #include <string.h>
 #include <inttypes.h>
 

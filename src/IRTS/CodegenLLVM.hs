@@ -7,23 +7,15 @@ import IRTS.Lang
 import IRTS.Simplified
 -- import IRTS.System
 import qualified Idris.Core.TT as TT
-import Idris.Core.TT (ArithTy(..), IntTy(..), NativeTy(..), nativeTyWidth)
+import Idris.Core.TT (ArithTy(..), IntTy(..), NativeTy(..), nativeTyWidth, sUN)
 
 import Util.System
 import Paths_idris_llvm
 import System.FilePath
 
-import LLVM.General.Context
-import LLVM.General.Diagnostic
 import LLVM.General.AST
 import LLVM.General.AST.AddrSpace
-import LLVM.General.Target ( TargetMachine
-                           , withTargetOptions, withTargetMachine, getTargetMachineDataLayout
-                           , initializeAllTargets, lookupTarget
-                           )
 import LLVM.General.AST.DataLayout
-import qualified LLVM.General.PassManager as PM
-import qualified LLVM.General.Module as MO
 import qualified LLVM.General.AST.IntegerPredicate as IPred
 import qualified LLVM.General.AST.FloatingPointPredicate as FPred
 import qualified LLVM.General.AST.Linkage as L
@@ -33,9 +25,6 @@ import qualified LLVM.General.AST.Attribute as A
 import qualified LLVM.General.AST.Global as G
 import qualified LLVM.General.AST.Constant as C
 import qualified LLVM.General.AST.Float as F
-import qualified LLVM.General.Relocation as R
-import qualified LLVM.General.CodeModel as CM
-import qualified LLVM.General.CodeGenOpt as CGO
 
 import Data.List
 import Data.Maybe
@@ -59,7 +48,7 @@ import System.Exit (ExitCode(..))
 import Debug.Trace
 
 data Target = Target { triple :: String, dataLayout :: DataLayout }
-
+type TargetMachine = String
 -- These might want to live in a different file
 
 getCC :: IO String
@@ -115,31 +104,17 @@ codegenLLVM' :: [(TT.Name, SDecl)] ->
                 FilePath -> -- output file name
                 OutputType ->
                 IO ()
-codegenLLVM' defs triple cpu optimize file outty = withContext $ \context -> do
-  initializeAllTargets
-  (target, _) <- failInIO $ lookupTarget Nothing triple
-  withTargetOptions $ \options ->
-      withTargetMachine target triple cpu S.empty options R.Default CM.Default CGO.Default $ \tm ->
-          do layout <- getTargetMachineDataLayout tm
+codegenLLVM' defs triple cpu optimize file outty = do
+             let layout = defaultDataLayout
              let ast = codegen (Target triple layout) (map snd defs)
-             result <- runErrorT .  MO.withModuleFromAST context ast $ \m ->
-                       do let opts = PM.defaultCuratedPassSetSpec
-                                     { PM.optLevel = Just optimize
-                                     , PM.simplifyLibCalls = Just True
-                                     , PM.useInlinerWithThreshold = Just 225
-                                     }
-                          when (optimize /= 0) $ PM.withPassManager opts $ void . flip PM.runPassManager m
-                          outputModule tm file outty m
-             case result of
-               Right _ -> return ()
-               Left msg -> ierror msg
+             outputModule triple file outty ast
 
 failInIO :: ErrorT String IO a -> IO a
 failInIO = either fail return <=< runErrorT
 
-outputModule :: TargetMachine -> FilePath -> OutputType -> MO.Module -> IO ()
-outputModule _  file Raw    m = failInIO $ MO.writeBitcodeToFile file m
-outputModule tm file Object m = failInIO $ MO.writeObjectToFile tm file m
+outputModule :: TargetMachine -> FilePath -> OutputType -> Module -> IO ()
+outputModule _  file Raw    m = writeSource file (show m)
+outputModule tm file Object m = error "Not implemented yet"
 outputModule tm file Executable m = withTmpFile $ \obj -> do
   outputModule tm obj Object m
   cc <- getCC
@@ -594,12 +569,12 @@ cgExpr (SProj conVar idx) = do
                   ] []
            Just <$> inst (Load False ptr Nothing 0 [])
 cgExpr (SConst c) = Just <$> cgConst c
-cgExpr (SForeign LANG_C rty fname args) = do
-  func <- ensureCDecl fname rty (map fst args)
+cgExpr (SForeign rty (FStr fname) args) = do
+  func <- ensureCDecl fname (toFType rty) (map (toFType . fst) args)
   argVals <- forM args $ \(fty, v) -> do
                v' <- var v
                case v' of
-                 Just val -> return $ Just (fty, val)
+                 Just val -> return $ Just (toFType fty, val)
                  Nothing -> return Nothing
   case sequence argVals of
     Nothing -> return Nothing
@@ -613,7 +588,7 @@ cgExpr (SForeign LANG_C rty fname args) = do
                           , functionAttributes = []
                           , metadata = []
                           }
-      Just <$> box rty result
+      Just <$> box (toFType rty) result
 cgExpr (SOp fn args) = do
   argVals <- mapM var args
   case sequence argVals of
@@ -832,10 +807,10 @@ cgConst' (TT.B8  i) = C.Int 8  (fromIntegral i)
 cgConst' (TT.B16 i) = C.Int 16 (fromIntegral i)
 cgConst' (TT.B32 i) = C.Int 32 (fromIntegral i)
 cgConst' (TT.B64 i) = C.Int 64 (fromIntegral i)
-cgConst' (TT.B8V  v) = C.Vector (map ((C.Int  8) . fromIntegral) . V.toList $ v)
-cgConst' (TT.B16V v) = C.Vector (map ((C.Int 16) . fromIntegral) . V.toList $ v)
-cgConst' (TT.B32V v) = C.Vector (map ((C.Int 32) . fromIntegral) . V.toList $ v)
-cgConst' (TT.B64V v) = C.Vector (map ((C.Int 64) . fromIntegral) . V.toList $ v)
+-- cgConst' (TT.B8V  v) = C.Vector (map ((C.Int  8) . fromIntegral) . V.toList $ v)
+-- cgConst' (TT.B16V v) = C.Vector (map ((C.Int 16) . fromIntegral) . V.toList $ v)
+-- cgConst' (TT.B32V v) = C.Vector (map ((C.Int 32) . fromIntegral) . V.toList $ v)
+-- cgConst' (TT.B64V v) = C.Vector (map ((C.Int 64) . fromIntegral) . V.toList $ v)
 
 cgConst' (TT.BI i) = C.Array (IntegerType 8) (map (C.Int 8 . fromIntegral . fromEnum) (show i) ++ [C.Int 8 0])
 cgConst' (TT.Fl f) = C.Float (F.Double f)
@@ -849,10 +824,10 @@ cgConst c@(TT.B8  _) = box (FArith (ATInt (ITFixed IT8))) (ConstantOperand $ cgC
 cgConst c@(TT.B16 _) = box (FArith (ATInt (ITFixed IT16))) (ConstantOperand $ cgConst' c)
 cgConst c@(TT.B32 _) = box (FArith (ATInt (ITFixed IT32))) (ConstantOperand $ cgConst' c)
 cgConst c@(TT.B64 _) = box (FArith (ATInt (ITFixed IT64))) (ConstantOperand $ cgConst' c)
-cgConst c@(TT.B8V  v) = box (FArith (ATInt (ITVec IT8  (V.length v)))) (ConstantOperand $ cgConst' c)
-cgConst c@(TT.B16V v) = box (FArith (ATInt (ITVec IT16 (V.length v)))) (ConstantOperand $ cgConst' c)
-cgConst c@(TT.B32V v) = box (FArith (ATInt (ITVec IT32 (V.length v)))) (ConstantOperand $ cgConst' c)
-cgConst c@(TT.B64V v) = box (FArith (ATInt (ITVec IT64 (V.length v)))) (ConstantOperand $ cgConst' c)
+-- cgConst c@(TT.B8V  v) = box (FArith (ATInt (ITVec IT8  (V.length v)))) (ConstantOperand $ cgConst' c)
+-- cgConst c@(TT.B16V v) = box (FArith (ATInt (ITVec IT16 (V.length v)))) (ConstantOperand $ cgConst' c)
+-- cgConst c@(TT.B32V v) = box (FArith (ATInt (ITVec IT32 (V.length v)))) (ConstantOperand $ cgConst' c)
+-- cgConst c@(TT.B64V v) = box (FArith (ATInt (ITVec IT64 (V.length v)))) (ConstantOperand $ cgConst' c)
 cgConst c@(TT.Fl _) = box (FArith ATFloat) (ConstantOperand $ cgConst' c)
 cgConst c@(TT.Ch _) = box (FArith (ATInt ITChar)) (ConstantOperand $ cgConst' c)
 cgConst c@(TT.Str s) = do
@@ -917,8 +892,8 @@ ftyToTy :: FType -> Type
 ftyToTy (FArith (ATInt ITNative)) = IntegerType 32
 ftyToTy (FArith (ATInt ITBig)) = PointerType mpzTy (AddrSpace 0)
 ftyToTy (FArith (ATInt (ITFixed ty))) = IntegerType (fromIntegral $ nativeTyWidth ty)
-ftyToTy (FArith (ATInt (ITVec e c)))
-    = VectorType (fromIntegral c) (IntegerType (fromIntegral $ nativeTyWidth e))
+-- ftyToTy (FArith (ATInt (ITVec e c)))
+--     = VectorType (fromIntegral c) (IntegerType (fromIntegral $ nativeTyWidth e))
 ftyToTy (FArith (ATInt ITChar)) = IntegerType 32
 ftyToTy (FArith ATFloat) = FloatingPointType 64 IEEE
 ftyToTy FString = PointerType (IntegerType 8) (AddrSpace 0)
@@ -937,7 +912,7 @@ itConst :: IntTy -> Integer -> C.Constant
 itConst (ITFixed n) x = C.Int (fromIntegral $ nativeTyWidth n) x
 itConst ITNative x = itConst (ITFixed IT32) x
 itConst ITChar x = itConst (ITFixed IT32) x
-itConst (ITVec elts size) x = C.Vector (replicate size (itConst (ITFixed elts) x))
+-- itConst (ITVec elts size) x = C.Vector (replicate size (itConst (ITFixed elts) x))
 
 cgOp :: PrimFn -> [Operand] -> Codegen Operand
 cgOp (LTrunc ITBig ity) [x] = do
@@ -1092,26 +1067,26 @@ cgOp LStrFloat [s] = do
 
 cgOp LNoOp xs = return $ last xs
 
-cgOp (LMkVec ety c) xs | c == length xs = do
-  nxs <- mapM (unbox (FArith (ATInt (ITFixed ety)))) xs
-  vec <- foldM (\v (e, i) -> inst $ InsertElement v e (ConstantOperand (C.Int 32 i)) [])
-               (ConstantOperand $ C.Vector (replicate c (C.Undef (IntegerType . fromIntegral $ nativeTyWidth ety))))
-               (zip nxs [0..])
-  box (FArith (ATInt (ITVec ety c))) vec
+-- cgOp (LMkVec ety c) xs | c == length xs = do
+--   nxs <- mapM (unbox (FArith (ATInt (ITFixed ety)))) xs
+--   vec <- foldM (\v (e, i) -> inst $ InsertElement v e (ConstantOperand (C.Int 32 i)) [])
+--                (ConstantOperand $ C.Vector (replicate c (C.Undef (IntegerType . fromIntegral $ nativeTyWidth ety))))
+--                (zip nxs [0..])
+--   box (FArith (ATInt (ITVec ety c))) vec
 
-cgOp (LIdxVec ety c) [v,i] = do
-  nv <- unbox (FArith (ATInt (ITVec ety c))) v
-  ni <- unbox (FArith (ATInt (ITFixed IT32))) i
-  elt <- inst $ ExtractElement nv ni []
-  box (FArith (ATInt (ITFixed ety))) elt
+-- cgOp (LIdxVec ety c) [v,i] = do
+--   nv <- unbox (FArith (ATInt (ITVec ety c))) v
+--   ni <- unbox (FArith (ATInt (ITFixed IT32))) i
+--   elt <- inst $ ExtractElement nv ni []
+--   box (FArith (ATInt (ITFixed ety))) elt
 
-cgOp (LUpdateVec ety c) [v,i,e] = do
-  let fty = FArith (ATInt (ITVec ety c))
-  nv <- unbox fty v
-  ni <- unbox (FArith (ATInt (ITFixed IT32))) i
-  ne <- unbox (FArith (ATInt (ITFixed ety))) e
-  nv' <- inst $ InsertElement nv ne ni []
-  box fty nv'
+-- cgOp (LUpdateVec ety c) [v,i,e] = do
+--   let fty = FArith (ATInt (ITVec ety c))
+--   nv <- unbox fty v
+--   ni <- unbox (FArith (ATInt (ITFixed IT32))) i
+--   ne <- unbox (FArith (ATInt (ITFixed ety))) e
+--   nv' <- inst $ InsertElement nv ne ni []
+--   box fty nv'
 
 cgOp (LBitCast from to) [x] = do
   nx <- unbox (FArith from) x
@@ -1212,20 +1187,20 @@ cgOp LReadStr [p] = do
   s <- inst $ simpleCall "__idris_readStr" [np]
   box FString s
 
-cgOp LStdIn  [] = do
-  stdin <- getStdIn
-  ptr <- inst $ loadInv stdin
-  box FPtr ptr
-cgOp LStdOut  [] = do
-  stdout <- getStdOut
-  ptr <- inst $ loadInv stdout
-  box FPtr ptr
-cgOp LStdErr  [] = do
-  stdErr <- getStdErr
-  ptr <- inst $ loadInv stdErr
-  box FPtr ptr
+-- cgOp LStdIn  [] = do
+--   stdin <- getStdIn
+--   ptr <- inst $ loadInv stdin
+--   box FPtr ptr
+-- cgOp LStdOut  [] = do
+--   stdout <- getStdOut
+--   ptr <- inst $ loadInv stdout
+--   box FPtr ptr
+-- cgOp LStdErr  [] = do
+--   stdErr <- getStdErr
+--   ptr <- inst $ loadInv stdErr
+--   box FPtr ptr
 
-cgOp LNullPtr [] = box FPtr (ConstantOperand $ C.Null (PointerType (IntegerType 8) (AddrSpace 0)))
+-- cgOp LNullPtr [] = box FPtr (ConstantOperand $ C.Null (PointerType (IntegerType 8) (AddrSpace 0)))
 
 cgOp prim args = ierror $ "Unimplemented primitive: <" ++ show prim ++ ">("
                   ++ intersperse ',' (take (length args) ['a'..]) ++ ")"
@@ -1296,7 +1271,7 @@ fCmp pred x y = do
   box (FArith (ATInt (ITFixed IT32))) nr
 
 cmpResultTy :: IntTy -> FType
-cmpResultTy v@(ITVec _ _) = FArith (ATInt v)
+-- cmpResultTy v@(ITVec _ _) = FArith (ATInt v)
 cmpResultTy _ = FArith (ATInt (ITFixed IT32))
 
 mpzBin :: String -> Operand -> Operand -> Codegen Operand
@@ -1334,6 +1309,30 @@ mpzCmp pred x y = do
   result <- inst $ ICmp pred cmp (ConstantOperand (C.Int 32 0)) []
   i <- inst $ ZExt result (IntegerType 32) []
   box (FArith (ATInt (ITFixed IT32))) i
+
+
+-- Deconstruct the Foreign type in the defunctionalised expression and build
+-- a foreign type description for c_irts and irts_c
+toAType (FCon i) 
+    | i == sUN "C_IntChar" = ATInt ITChar
+    | i == sUN "C_IntNative" = ATInt ITNative
+    | i == sUN "C_IntBits8" = ATInt (ITFixed IT8)
+    | i == sUN "C_IntBits16" = ATInt (ITFixed IT16)
+    | i == sUN "C_IntBits32" = ATInt (ITFixed IT32)
+    | i == sUN "C_IntBits64" = ATInt (ITFixed IT64)
+toAType t = error (show t ++ " not defined in toAType")
+
+toFType (FCon c) 
+    | c == sUN "C_Str" = FString
+    | c == sUN "C_Float" = FArith ATFloat
+    | c == sUN "C_Ptr" = FPtr
+    | c == sUN "C_MPtr" = FManagedPtr
+    | c == sUN "C_Unit" = FUnit
+toFType (FApp c [_,ity]) 
+    | c == sUN "C_IntT" = FArith (toAType ity)
+toFType (FApp c [_]) 
+    | c == sUN "C_Any" = FAny
+toFType t = FAny
 
 simpleCall :: String -> [Operand] -> Instruction
 simpleCall name args =
