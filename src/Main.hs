@@ -3,6 +3,7 @@ module Main where
 import Idris.Core.TT
 import Idris.AbsSyntax
 import Idris.ElabDecls
+import Idris.Main
 import Idris.REPL
 
 import Paths_idris_llvm
@@ -36,7 +37,7 @@ llvm_main :: Opts -> Idris ()
 llvm_main opts = do elabPrims
                     loadInputs (inputs opts) Nothing
                     mainProg <- elabMain
-                    ir <- compile (Via "llvm") (output opts) (Just mainProg)
+                    ir <- compile (Via IBCFormat "llvm") (output opts) (Just mainProg)
                     runIO $ codegenLLVM (ir { CG.targetTriple = oTargetTriple opts, CG.targetCPU = oTargetCPU opts } )
 
 main :: IO ()

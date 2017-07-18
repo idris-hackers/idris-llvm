@@ -10,21 +10,24 @@ Extra-source-files:
 		llvm/Makefile
 		llvm/*.c
 
-Executable idris-llvm
+Executable idris-codegen-llvm
   Main-is:        Main.hs
   hs-source-dirs: src
 
   Build-depends:  idris
                 , base
+                , bytestring
                 , containers
                 , directory
                 , filepath
                 , haskeline >= 0.7
                 , mtl
                 , process
+                , text
                 , transformers
                 , vector
-                , llvm-general-pure == 3.3.8.*
+                , llvm-hs
+                , llvm-hs-pure
 
   other-modules: IRTS.CodegenLLVM
   cpp-options:   -DIDRIS_LLVM
