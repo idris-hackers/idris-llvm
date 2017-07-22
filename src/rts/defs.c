@@ -97,6 +97,45 @@ char *__idris_readStr(FILE* h) {
   return line_buf;
 }
 
+char* __idris_readChars(int len, FILE* h) {
+    char* buffer = (char*) GC_malloc(len);
+    int read = fgets(buffer, len, h);
+    if (read == 0) buffer[0] = 0;
+    return buffer;
+}
+
+
+int __idris_writeStr(void* h, char* str) {
+    FILE* f = (FILE*)h;
+    if (fputs(str, f) >= 0) {
+        return 0;
+    } else {
+        return -1;
+    }
+}
+
+void* __idris_registerPtr(void* p, int size) {
+    void* mp = GC_malloc(size);
+    return memcpy(mp, p, size);
+}
+
+
+int __idris_sizeofPtr(void) {
+    return sizeof((void*)0);
+}
+
+// stdin and friends are often macros, so let C handle that problem. 
+FILE* __idris_stdin() {
+    return stdin;
+}
+
+FILE* __idris_stdout() {
+    return stdout;
+}
+FILE* __idris_stderr() {
+    return stderr;
+}
+
 void* fileOpen(char* name, char* mode) {
   FILE* f = fopen(name, mode);
   return (void*)f;

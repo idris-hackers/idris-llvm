@@ -80,17 +80,6 @@ getIncFlags = do dir <- getDataDir
                  return $ ["-I" ++ dir </> "rts", extraInclude]
 
 
-stdinName, stdoutName, stderrName :: Target -> String
-#if defined(FREEBSD) || defined(DRAGONFLY) || defined(MACOSX)
-stdinName _ = "__stdinp"
-stdoutName _ = "__stdoutp"
-stderrName _ = "__stderrp"
-#else
-stdinName _ = "stdin"
-stdoutName _ = "stdout"
-stderrName _ = "stderr"
-#endif
-
 -- FIXME: 'optimisation' is no longer a field in CodeGenerator, because
 -- optimisation levels at the idris command line are meant to
 -- indicate idris optimisation levels, not levels to pass through to
@@ -136,7 +125,7 @@ ierror msg = error $ "INTERNAL ERROR: IRTS.CodegenLLVM: " ++ msg
 
 
 -- Type helpers
-
+---------------
 glRef n = C.GlobalReference (tyRef n) (mkName n)
 globalRef n = ConstantOperand $ glRef n
 
@@ -146,16 +135,20 @@ i16 = IntegerType 16
 i32 = IntegerType 32
 i64 = IntegerType 64
 
+f32 = FloatingPointType FloatFP
 f64 = FloatingPointType DoubleFP
 
+-- pointers
 ptr t = PointerType t (AddrSpace 0) 
 ptrI8 =  ptr i8 
 ppI8 = ptr ptrI8
 
-
-
 pmpz = PointerType mpzTy (AddrSpace 0)
 
+-- value helpers
+----------------
+
+ci32 v = ConstantOperand (C.Int 32 v)
 
 mainDef :: Global
 mainDef =
@@ -179,22 +172,18 @@ mainDef =
           , Do $ Store False (globalRef "__idris_argv") 
                        (LocalReference ppI8 (mkName "argv")) Nothing 0 []
           , UnName 1 := idrCall "{runMain_0}" [] ]
-          (Do $ Ret (Just (ConstantOperand (C.Int 32 0))) [])
+          (Do $ Ret (Just (ci32 0)) [])
         ]}
 
 initDefs :: Target -> [Definition]
 initDefs tgt =
     [ TypeDefinition (mkName "valTy")
       (Just $ StructureType False
-                [ IntegerType 32
-                , ArrayType 0 (PointerType valueType (AddrSpace 0))
+                [ i32
+                , ArrayType 0 (ptr valueType)
                 ])
     , TypeDefinition (mkName "mpz")
-        (Just $ StructureType False
-                  [ IntegerType 32
-                  , IntegerType 32
-                  , PointerType intPtr (AddrSpace 0)
-                  ])
+        (Just $ StructureType False [i32, i32, ptr intPtr])
     , GlobalDefinition $ globalVariableDefaults
       { G.name = mkName "__idris_intFmtStr"
       , G.linkage = L.Internal
@@ -277,6 +266,13 @@ initDefs tgt =
     , exfun "mpz_init_set_sll" VoidType [pmpz, IntegerType 64] False
     , exfun "__idris_strCons" ptrI8 [IntegerType 8, ptrI8] False
     , exfun "__idris_readStr" ptrI8 [ptrI8] False -- Actually pointer to FILE, but it's opaque anyway
+    , exfun "__idris_readChars" ptrI8 [i32, ptrI8] False
+    , exfun "__idris_writeStr" i32 [ptrI8, ptrI8] False
+    , exfun "__idris_registerPtr" ptrI8 [ptrI8, i32] False
+    , exfun "__idris_sizeofPtr" i32 [] False
+    , exfun "__idris_stdin" ptrI8 [] False  
+    , exfun "__idris_stdout" ptrI8 [] False  
+    , exfun "__idris_stderr" ptrI8 [] False  
     , exfun "__idris_gmpMalloc" ptrI8 [intPtr] False
     , exfun "__idris_gmpRealloc" ptrI8 [ptrI8, intPtr, intPtr] False
     , exfun "__idris_gmpFree" VoidType [ptrI8, intPtr] False
@@ -284,9 +280,7 @@ initDefs tgt =
     , exfun "strtoll" (IntegerType 64) [ptrI8, PointerType ptrI8 (AddrSpace 0), IntegerType 32] False
     , exfun "strtod" (f64) [ptrI8, PointerType ptrI8 (AddrSpace 0)] False
     , exfun "putErr" VoidType [ptrI8] False
-    , exVar (stdinName tgt) ptrI8
-    , exVar (stdoutName tgt) ptrI8
-    , exVar (stderrName tgt) ptrI8
+    , exfun "printf" i32 [ptrI8] True
     , exVar "__idris_argc" (IntegerType 32)
     , exVar "__idris_argv" (PointerType ptrI8 (AddrSpace 0))
     , GlobalDefinition mainDef
@@ -315,14 +309,6 @@ initDefs tgt =
       exVar :: String -> Type -> Definition
       exVar name ty = GlobalDefinition $ globalVariableDefaults { G.name = mkName name, G.type' = ty }
 
-getStream :: (Target -> String) -> Codegen Operand
-getStream f = do i <- asks target
-                 return $ globalRef (f i)
-
-getStdIn, getStdOut, getStdErr :: Codegen Operand
-getStdIn  = getStream stdinName
-getStdOut = getStream stdoutName
-getStdErr = getStream stderrName
 
 codegen :: String -> Target -> [SDecl] -> Module
 codegen file tgt defs = Module {
@@ -821,18 +807,20 @@ box fty fval = do
   val <- if isHeapFTy fty then alloc ty else allocAtomic ty
   tagptr <- inst $ GetElementPtr True val [ConstantOperand (C.Int 32 0), ConstantOperand (C.Int 32 0)] []
   valptr <- inst $ GetElementPtr True val [ConstantOperand (C.Int 32 0), ConstantOperand (C.Int 32 1)] []
-  inst' $ Store False tagptr (ConstantOperand (C.Int 32 (-1))) Nothing 0 []
+  inst' $ Store False tagptr (ci32 (-1)) Nothing 0 []
   inst' $ Store False valptr fval Nothing 0 []
-  ptrI8 <- inst $ BitCast val (PointerType (IntegerType 8) (AddrSpace 0)) []
-  inst' $ simpleCall "llvm.invariant.start" [ConstantOperand $ C.Int 64 (-1), ptrI8]
+  p <- inst $ BitCast val ptrI8 []
+  inst' $ simpleCall "llvm.invariant.start" [ConstantOperand $ C.Int 64 (-1), p]
   inst $ BitCast val (PointerType valueType (AddrSpace 0)) []
 
 unbox :: FType -> Operand -> Codegen Operand
 unbox FUnit x = return x
 unbox fty bval = do
   val <- inst $ BitCast bval (PointerType (primTy (ftyToTy fty)) (AddrSpace 0)) []
-  fvalptr <- inst $ GetElementPtr True val [ConstantOperand (C.Int 32 0), ConstantOperand (C.Int 32 1)] []
+  fvalptr <- inst $ GetElementPtr True val [ci32 0, ci32 1] []
   inst $ Load False fvalptr Nothing 0 []
+
+
 
 cgConst' :: TT.Const -> C.Constant
 cgConst' (TT.I i) = C.Int 32 (fromIntegral i)
@@ -845,10 +833,10 @@ cgConst' (TT.B64 i) = C.Int 64 (fromIntegral i)
 -- cgConst' (TT.B32V v) = C.Vector (map ((C.Int 32) . fromIntegral) . V.toList $ v)
 -- cgConst' (TT.B64V v) = C.Vector (map ((C.Int 64) . fromIntegral) . V.toList $ v)
 
-cgConst' (TT.BI i) = C.Array (IntegerType 8) (map (C.Int 8 . fromIntegral . fromEnum) (show i) ++ [C.Int 8 0])
+cgConst' (TT.BI i) = C.Array i8 (map (C.Int 8 . fromIntegral . fromEnum) (show i) ++ [C.Int 8 0])
 cgConst' (TT.Fl f) = C.Float (F.Double f)
 cgConst' (TT.Ch c) = C.Int 32 . fromIntegral . fromEnum $ c
-cgConst' (TT.Str s) = C.Array (IntegerType 8) (map (C.Int 8 . fromIntegral . fromEnum) s ++ [C.Int 8 0])
+cgConst' (TT.Str s) = C.Array i8 (map (C.Int 8 . fromIntegral . fromEnum) s ++ [C.Int 8 0])
 cgConst' x = ierror $ "Unsupported constant: " ++ show x
 
 cgConst :: TT.Const -> Codegen Operand
@@ -857,10 +845,7 @@ cgConst c@(TT.B8  _) = box (FArith (ATInt (ITFixed IT8))) (ConstantOperand $ cgC
 cgConst c@(TT.B16 _) = box (FArith (ATInt (ITFixed IT16))) (ConstantOperand $ cgConst' c)
 cgConst c@(TT.B32 _) = box (FArith (ATInt (ITFixed IT32))) (ConstantOperand $ cgConst' c)
 cgConst c@(TT.B64 _) = box (FArith (ATInt (ITFixed IT64))) (ConstantOperand $ cgConst' c)
--- cgConst c@(TT.B8V  v) = box (FArith (ATInt (ITVec IT8  (V.length v)))) (ConstantOperand $ cgConst' c)
--- cgConst c@(TT.B16V v) = box (FArith (ATInt (ITVec IT16 (V.length v)))) (ConstantOperand $ cgConst' c)
--- cgConst c@(TT.B32V v) = box (FArith (ATInt (ITVec IT32 (V.length v)))) (ConstantOperand $ cgConst' c)
--- cgConst c@(TT.B64V v) = box (FArith (ATInt (ITVec IT64 (V.length v)))) (ConstantOperand $ cgConst' c)
+
 cgConst c@(TT.Fl _) = box (FArith ATFloat) (ConstantOperand $ cgConst' c)
 cgConst c@(TT.Ch _) = box (FArith (ATInt ITChar)) (ConstantOperand $ cgConst' c)
 cgConst c@(TT.Str s) = do
@@ -922,16 +907,16 @@ ffunDecl name rty argtys =
     }
 
 ftyToTy :: FType -> Type
-ftyToTy (FArith (ATInt ITNative)) = IntegerType 32
-ftyToTy (FArith (ATInt ITBig)) = PointerType mpzTy (AddrSpace 0)
+ftyToTy (FArith (ATInt ITNative)) = i32
+ftyToTy (FArith (ATInt ITBig)) = ptr mpzTy
 ftyToTy (FArith (ATInt (ITFixed ty))) = IntegerType (fromIntegral $ nativeTyWidth ty)
 -- ftyToTy (FArith (ATInt (ITVec e c)))
 --     = VectorType (fromIntegral c) (IntegerType (fromIntegral $ nativeTyWidth e))
-ftyToTy (FArith (ATInt ITChar)) = IntegerType 32
+ftyToTy (FArith (ATInt ITChar)) = i32
 ftyToTy (FArith ATFloat) = f64
-ftyToTy FString = PointerType (IntegerType 8) (AddrSpace 0)
+ftyToTy FString = ptrI8
 ftyToTy FUnit = VoidType
-ftyToTy FPtr = PointerType (IntegerType 8) (AddrSpace 0)
+ftyToTy FPtr = ptrI8
 ftyToTy FAny = valueType
 
 -- Only use when known not to be ITBig
@@ -1100,26 +1085,6 @@ cgOp LStrFloat [s] = do
 
 cgOp LNoOp xs = return $ last xs
 
--- cgOp (LMkVec ety c) xs | c == length xs = do
---   nxs <- mapM (unbox (FArith (ATInt (ITFixed ety)))) xs
---   vec <- foldM (\v (e, i) -> inst $ InsertElement v e (ConstantOperand (C.Int 32 i)) [])
---                (ConstantOperand $ C.Vector (replicate c (C.Undef (IntegerType . fromIntegral $ nativeTyWidth ety))))
---                (zip nxs [0..])
---   box (FArith (ATInt (ITVec ety c))) vec
-
--- cgOp (LIdxVec ety c) [v,i] = do
---   nv <- unbox (FArith (ATInt (ITVec ety c))) v
---   ni <- unbox (FArith (ATInt (ITFixed IT32))) i
---   elt <- inst $ ExtractElement nv ni []
---   box (FArith (ATInt (ITFixed ety))) elt
-
--- cgOp (LUpdateVec ety c) [v,i,e] = do
---   let fty = FArith (ATInt (ITVec ety c))
---   nv <- unbox fty v
---   ni <- unbox (FArith (ATInt (ITFixed IT32))) i
---   ne <- unbox (FArith (ATInt (ITFixed ety))) e
---   nv' <- inst $ InsertElement nv ne ni []
---   box fty nv'
 
 cgOp (LBitCast from to) [x] = do
   nx <- unbox (FArith from) x
@@ -1165,7 +1130,7 @@ cgOp (LStrInt ity) [s] = do
   ns <- unbox FString s
   nx <- inst $ simpleCall "strtoll"
         [ns
-        , ConstantOperand $ C.Null (PointerType (PointerType (IntegerType 8) (AddrSpace 0)) (AddrSpace 0))
+        , ConstantOperand $ C.Null ppI8
         , ConstantOperand $ C.Int 32 10
         ]
   nx' <- case ity of
@@ -1215,15 +1180,109 @@ cgOp LStrRev [s] = do
   ns <- unbox FString s
   box FString =<< inst (simpleCall "__idris_strRev" [ns])
 
-cgOp LReadStr [p] = do
-  np <- unbox FPtr p
+cgOp LStrSubstr [x, y, z] = ignore
+
+cgOp LReadStr [_] = do
+  np <- inst $ simpleCall "__idris_stdin" []
   s <- inst $ simpleCall "__idris_readStr" [np]
   box FString s
 
+cgOp LWriteStr [_,p] = do
+  np <- unbox FPtr p
+  s <- inst $ simpleCall "printf" [np]
+  box (FArith (ATInt ITNative)) s
+
+
+cgOp LSystemInfo [x] = ignore
+cgOp LCrash [x] = ignore
+cgOp LFork [x] = ignore
+cgOp LPar [x] = ignore
 
 -- TODO: ignored primitives, fill in
-cgOp LWriteStr xs = return ignore
-cgOp (LExternal pk) xs = return ignore
+
+cgOp (LExternal pr) [_, x] | pr == sUN "prim__readFile" = do
+    sp <- unbox FPtr x
+    s <- inst $ simpleCall "__idris_readStr" [sp]
+    box FString s
+
+cgOp (LExternal pr) [_,len,x] | pr == sUN "prim__readChars" = do
+    l <- unbox (FArith (ATInt ITNative)) len
+    sp <- unbox FPtr x
+    s <- inst $ simpleCall "__idris_readChars" [l, sp]
+    box FString s
+
+cgOp (LExternal pr) [_, x, s] | pr == sUN "prim__writeFile" = do
+    f <- unbox FPtr x
+    sp <- unbox FString s
+    i <- inst $ simpleCall "__idris_writeStr" [f, sp]
+    box (FArith (ATInt ITNative)) i
+
+cgOp (LExternal pr) [] | pr == sUN "prim__stdin" = do 
+    i <- inst $ simpleCall "__idris_stdin" []
+    box FPtr i
+cgOp (LExternal pr) [] | pr == sUN "prim__stdout" = do 
+    i <- inst $ simpleCall "__idris_stdout" []
+    box FPtr i
+cgOp (LExternal pr) [] | pr == sUN "prim__stderr" = do 
+    i <- inst $ simpleCall "__idris_stdout" []
+    box FPtr i
+    
+cgOp (LExternal pr) [p] | pr == sUN "prim__asPtr" = return p
+cgOp (LExternal pr) [] | pr == sUN "prim__null" = do
+    ws <- getWordSize
+    zp <- inst $ IntToPtr (ConstantOperand (C.Int ws 0)) ptrI8 []
+    box FPtr zp
+
+cgOp (LExternal pr) [_] | pr == sUN "prim__vm" = ignore
+cgOp (LExternal pr) [x, y] | pr == sUN "prim__eqPtr" = ptrEq x y
+cgOp (LExternal pr) [x, y] | pr == sUN "prim__eqManagedPtr" = ptrEq x y
+
+cgOp (LExternal pr) [p, i] | pr == sUN "prim__registerPtr" = do
+    l <- unbox (FArith (ATInt ITNative)) i
+    sp <- unbox FPtr p
+    s <- inst $ simpleCall "__idris_registerPtr" [sp, l]
+    box FPtr s
+
+
+cgOp (LExternal pr) [_, p, o] | pr == sUN "prim__peek8" = peek (FArith (ATInt (ITFixed IT8))) p o
+cgOp (LExternal pr) [_, p, o, x] | pr == sUN "prim__poke8" = poke (FArith (ATInt (ITFixed IT8))) p o x
+
+cgOp (LExternal pr) [_, p, o] | pr == sUN "prim__peek16" = peek (FArith (ATInt (ITFixed IT16))) p o
+cgOp (LExternal pr) [_, p, o, x] | pr == sUN "prim__poke16" = poke (FArith (ATInt (ITFixed IT16))) p o x
+cgOp (LExternal pr) [_, p, o] | pr == sUN "prim__peek32" = peek (FArith (ATInt (ITFixed IT32))) p o 
+cgOp (LExternal pr) [_, p, o, x] | pr == sUN "prim__poke32" = poke (FArith (ATInt (ITFixed IT32))) p o x
+cgOp (LExternal pr) [_, p, o] | pr == sUN "prim__peek64" = peek (FArith (ATInt (ITFixed IT64))) p o
+cgOp (LExternal pr) [_, p, o, x] | pr == sUN "prim__poke64" = poke (FArith (ATInt (ITFixed IT64))) p o x
+
+cgOp (LExternal pr) [_, p, o] | pr == sUN "prim__peekPtr" = peek FPtr p o
+cgOp (LExternal pr) [_, p, o, x] | pr == sUN "prim__pokePtr" = poke FPtr p o x
+
+cgOp (LExternal pr) [_, p, o] | pr == sUN "prim__peekDouble" = peek (FArith ATFloat) p o
+cgOp (LExternal pr) [_, p, o, x] | pr == sUN "prim__pokeDouble" = poke (FArith ATFloat) p o x
+
+cgOp (LExternal pr) [_, p, o] | pr == sUN "prim__peekSingle" = peekSingle p o
+cgOp (LExternal pr) [_, p, o, x] | pr == sUN "prim__pokeSingle" = pokeSingle p o x
+
+cgOp (LExternal pr) [p, n] | pr == sUN "prim__ptrOffset" = do
+    pt <- unbox FPtr p
+    o <- unbox (FArith (ATInt ITNative)) n
+    ws <- getWordSize
+    offz <- inst $ ZExt o (IntegerType ws) []
+    i <- inst $ PtrToInt pt (IntegerType ws) []
+    offi <- inst $ Add False True i offz []
+    offp <- inst $ IntToPtr offi ptrI8 []
+    box FPtr offp
+
+cgOp (LExternal pr) [] | pr == sUN "prim__sizeofPtr" = do
+    i <- inst $ simpleCall "__idris_sizeofPtr" []
+    box (FArith (ATInt ITNative)) i
+
+
+
+
+
+
+-- cgOp (LExternal pk) xs = ignore
 
 --  cgOp LStdIn  [] = do
 --   stdin <- getStdIn
@@ -1244,7 +1303,7 @@ cgOp prim args = ierror $ "Unimplemented primitive: <" ++ show prim ++ ">("
                   ++ intersperse ',' (take (length args) ['a'..]) ++ ")"
 
 
-ignore = ConstantOperand nullValue
+ignore = return $ ConstantOperand nullValue
 iCoerce :: (Operand -> Type -> InstructionMetadata -> Instruction) -> NativeTy -> NativeTy -> Operand -> Codegen Operand
 iCoerce _ from to x | from == to = return x
 iCoerce operator from to x = do
@@ -1349,6 +1408,63 @@ mpzCmp pred x y = do
   result <- inst $ ICmp pred cmp (ConstantOperand (C.Int 32 0)) []
   i <- inst $ ZExt result (IntegerType 32) []
   box (FArith (ATInt (ITFixed IT32))) i
+
+
+ptrEq x y = do
+    a <- unbox FPtr x
+    b <- unbox FPtr y
+    e <- inst $ ICmp IPred.EQ a b []
+    r <- inst $ SExt e i32 []
+    box (FArith (ATInt ITNative)) r
+
+peek t p o = do
+    pt <- unbox FPtr p
+    off <- unbox (FArith (ATInt ITNative)) o
+    ws <- getWordSize
+    offz <- inst $ ZExt off (IntegerType ws) []
+    i <- inst $ PtrToInt pt (IntegerType ws) []
+    offi <- inst $ Add False True i offz []
+    offp <- inst $ IntToPtr offi (ptr $ ftyToTy t) []
+    r <- inst $ Load False offp Nothing 0 []
+    box t r
+
+poke t p o x = do
+    pt <- unbox FPtr p
+    off <- unbox (FArith (ATInt ITNative)) o
+    v <- unbox t x
+    ws <- getWordSize
+    offz <- inst $ ZExt off (IntegerType ws) []
+    i <- inst $ PtrToInt pt (IntegerType ws) []
+    offi <- inst $ Add False True i offz []
+    offp <- inst $ IntToPtr offi (ptr $ ftyToTy t) []
+    inst' $ Store False offp v Nothing 0 []
+    box (FArith (ATInt ITNative)) (ci32 0)
+
+peekSingle p o = do
+    pt <- unbox FPtr p
+    off <- unbox (FArith (ATInt ITNative)) o
+    ws <- getWordSize
+    offz <- inst $ ZExt off (IntegerType ws) []
+    i <- inst $ PtrToInt pt (IntegerType ws) []
+    offi <- inst $ Add False True i offz []
+    offp <- inst $ IntToPtr offi (ptr f32) []
+    r <- inst $ Load False offp Nothing 0 []
+    d <- inst $ FPExt r f64 []
+    box (FArith ATFloat) d
+
+pokeSingle p o x = do
+    pt <- unbox FPtr p
+    off <- unbox (FArith (ATInt ITNative)) o
+    v <- unbox (FArith ATFloat) x
+    s <- inst $ FPTrunc v f32 []
+    ws <- getWordSize
+    offz <- inst $ ZExt off (IntegerType ws) []
+    i <- inst $ PtrToInt pt (IntegerType ws) []
+    offi <- inst $ Add False True i offz []
+    offp <- inst $ IntToPtr offi (ptr $ f32) []
+    inst' $ Store False offp s Nothing 0 []
+    box (FArith (ATInt ITNative)) (ci32 0)
+
 
 
 -- Deconstruct the Foreign type in the defunctionalised expression and build
