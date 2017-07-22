@@ -1,44 +1,41 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# LANGUAGE CPP #-}
+{-# LANGUAGE CPP, OverloadedStrings #-}
 module IRTS.CodegenLLVM (codegenLLVM) where
 
 import IRTS.CodegenCommon
 import IRTS.Lang
 import IRTS.Simplified
--- import IRTS.System
+import IRTS.System
+
 import qualified Idris.Core.TT as TT
-import Idris.Core.TT (ArithTy(..), IntTy(..), NativeTy(..), nativeTyWidth)
+import Idris.Core.TT (ArithTy(..), IntTy(..), NativeTy(..), nativeTyWidth, sUN)
 
 import Util.System
 import Paths_idris_llvm
 import System.FilePath
 
-import LLVM.General.Context
-import LLVM.General.Diagnostic
-import LLVM.General.AST
-import LLVM.General.AST.AddrSpace
-import LLVM.General.Target ( TargetMachine
-                           , withTargetOptions, withTargetMachine, getTargetMachineDataLayout
-                           , initializeAllTargets, lookupTarget
-                           )
-import LLVM.General.AST.DataLayout
-import qualified LLVM.General.PassManager as PM
-import qualified LLVM.General.Module as MO
-import qualified LLVM.General.AST.IntegerPredicate as IPred
-import qualified LLVM.General.AST.FloatingPointPredicate as FPred
-import qualified LLVM.General.AST.Linkage as L
-import qualified LLVM.General.AST.Visibility as V
-import qualified LLVM.General.AST.CallingConvention as CC
-import qualified LLVM.General.AST.Attribute as A
-import qualified LLVM.General.AST.Global as G
-import qualified LLVM.General.AST.Constant as C
-import qualified LLVM.General.AST.Float as F
-import qualified LLVM.General.Relocation as R
-import qualified LLVM.General.CodeModel as CM
-import qualified LLVM.General.CodeGenOpt as CGO
+import qualified LLVM
+import LLVM.Context
+import LLVM.AST
+import LLVM.AST.AddrSpace
+import LLVM.AST.DataLayout
+import qualified LLVM.AST.IntegerPredicate as IPred
+import qualified LLVM.AST.FloatingPointPredicate as FPred
+import qualified LLVM.AST.Linkage as L
+import qualified LLVM.AST.Visibility as V
+import qualified LLVM.AST.CallingConvention as CC
+import qualified LLVM.AST.Attribute as A
+import qualified LLVM.AST.Global as G
+import qualified LLVM.AST.Constant as C
+import qualified LLVM.AST.Float as F
 
+import qualified Data.ByteString as B
+import Data.Char
 import Data.List
 import Data.Maybe
+import Data.String
+import qualified Data.Text as T
+import Data.Text.Encoding
 import Data.Word
 import Data.Map (Map)
 import qualified Data.Map as M
@@ -59,11 +56,9 @@ import System.Exit (ExitCode(..))
 import Debug.Trace
 
 data Target = Target { triple :: String, dataLayout :: DataLayout }
-
+type TargetMachine = String
 -- These might want to live in a different file
 
-getCC :: IO String
-getCC = fromMaybe "gcc" <$> environment "IDRIS_CC"
 
 -- TODO These should probably be derived from the triple
 #if defined(FREEBSD) || defined(DRAGONFLY)
@@ -71,9 +66,6 @@ extraLib = ["-L/usr/local/lib"]
 #else
 extraLib = []
 #endif
-
-getLibFlags = do dir <- getDataDir
-                 return $ extraLib
 
 getIdrisLibDir = do dir <- getDataDir
                     return $ addTrailingPathSeparator dir
@@ -115,43 +107,25 @@ codegenLLVM' :: [(TT.Name, SDecl)] ->
                 FilePath -> -- output file name
                 OutputType ->
                 IO ()
-codegenLLVM' defs triple cpu optimize file outty = withContext $ \context -> do
-  initializeAllTargets
-  (target, _) <- failInIO $ lookupTarget Nothing triple
-  withTargetOptions $ \options ->
-      withTargetMachine target triple cpu S.empty options R.Default CM.Default CGO.Default $ \tm ->
-          do layout <- getTargetMachineDataLayout tm
-             let ast = codegen (Target triple layout) (map snd defs)
-             result <- runErrorT .  MO.withModuleFromAST context ast $ \m ->
-                       do let opts = PM.defaultCuratedPassSetSpec
-                                     { PM.optLevel = Just optimize
-                                     , PM.simplifyLibCalls = Just True
-                                     , PM.useInlinerWithThreshold = Just 225
-                                     }
-                          when (optimize /= 0) $ PM.withPassManager opts $ void . flip PM.runPassManager m
-                          outputModule tm file outty m
-             case result of
-               Right _ -> return ()
-               Left msg -> ierror msg
+codegenLLVM' defs triple cpu optimize file outty = do
+             let layout = defaultDataLayout LittleEndian
+             let ast = codegen file (Target triple layout) (map snd defs)
+             outputModule triple file outty ast
 
 failInIO :: ErrorT String IO a -> IO a
 failInIO = either fail return <=< runErrorT
 
-outputModule :: TargetMachine -> FilePath -> OutputType -> MO.Module -> IO ()
-outputModule _  file Raw    m = failInIO $ MO.writeBitcodeToFile file m
-outputModule tm file Object m = failInIO $ MO.writeObjectToFile tm file m
-outputModule tm file Executable m = withTmpFile $ \obj -> do
-  outputModule tm obj Object m
-  cc <- getCC
-  libflags <- getLibFlags
-  defs <- (</> "libidris_rts.a") <$> getDataDir
-  exit <- rawSystem cc ([obj, defs] ++ libflags ++ ["-lm", "-lgmp", "-lgc", "-o", file])
-  when (exit /= ExitSuccess) $ ierror "FAILURE: Linking"
-outputModule _ _ MavenProject _ = ierror "FAILURE: unsupported output type"
-
+outputModule :: TargetMachine -> FilePath -> OutputType -> Module -> IO ()
+outputModule _  file Raw    m = writeSource file (show m)
+outputModule tm file Object m = error "Not implemented yet"
+outputModule tm file Executable m = do
+  withContext $ \ctx ->
+    LLVM.withModuleFromAST ctx m $ \mod ->
+      LLVM.writeLLVMAssemblyToFile (LLVM.File file) mod    
+  
 withTmpFile :: (FilePath -> IO a) -> IO a
 withTmpFile f = do
-  (path, handle) <- tempfile
+  (path, handle) <- tempfile ""
   hClose handle
   result <- f path
   removeFile path
@@ -160,49 +134,72 @@ withTmpFile f = do
 ierror :: String -> a
 ierror msg = error $ "INTERNAL ERROR: IRTS.CodegenLLVM: " ++ msg
 
+
+-- Type helpers
+
+glRef n = C.GlobalReference (tyRef n) (mkName n)
+globalRef n = ConstantOperand $ glRef n
+
+
+i8 = IntegerType 8
+i16 = IntegerType 16
+i32 = IntegerType 32
+i64 = IntegerType 64
+
+f64 = FloatingPointType DoubleFP
+
+ptr t = PointerType t (AddrSpace 0) 
+ptrI8 =  ptr i8 
+ppI8 = ptr ptrI8
+
+
+
+pmpz = PointerType mpzTy (AddrSpace 0)
+
+
 mainDef :: Global
 mainDef =
     functionDefaults
-    { G.returnType = IntegerType 32
+    { G.returnType = i32
     , G.parameters =
-        ([ Parameter (IntegerType 32) (Name "argc") []
-         , Parameter (PointerType (PointerType (IntegerType 8) (AddrSpace 0)) (AddrSpace 0)) (Name "argv") []
+        ([ Parameter i32 (mkName "argc") []
+         , Parameter ppI8  (mkName "argv") []
          ], False)
-    , G.name = Name "main"
+    , G.name = mkName "main"
     , G.basicBlocks =
         [ BasicBlock (UnName 0)
           [ Do $ simpleCall "GC_init" [] -- Initialize Boehm GC
           , Do $ simpleCall "__gmp_set_memory_functions"
-                     [ ConstantOperand . C.GlobalReference . Name $ "__idris_gmpMalloc"
-                     , ConstantOperand . C.GlobalReference . Name $ "__idris_gmpRealloc"
-                     , ConstantOperand . C.GlobalReference . Name $ "__idris_gmpFree"
+                     [ globalRef "__idris_gmpMalloc"
+                     , globalRef "__idris_gmpRealloc"
+                     , globalRef "__idris_gmpFree"
                      ]
-          , Do $ Store False (ConstantOperand . C.GlobalReference . Name $ "__idris_argc") 
-                       (LocalReference (Name "argc")) Nothing 0 []
-          , Do $ Store False (ConstantOperand . C.GlobalReference . Name $ "__idris_argv") 
-                       (LocalReference (Name "argv")) Nothing 0 []
-          , UnName 1 := idrCall "{runMain0}" [] ]
+          , Do $ Store False (globalRef "__idris_argc") 
+                       (LocalReference i32 (mkName "argc")) Nothing 0 []
+          , Do $ Store False (globalRef "__idris_argv") 
+                       (LocalReference ppI8 (mkName "argv")) Nothing 0 []
+          , UnName 1 := idrCall "{runMain_0}" [] ]
           (Do $ Ret (Just (ConstantOperand (C.Int 32 0))) [])
         ]}
 
 initDefs :: Target -> [Definition]
 initDefs tgt =
-    [ TypeDefinition (Name "valTy")
+    [ TypeDefinition (mkName "valTy")
       (Just $ StructureType False
                 [ IntegerType 32
                 , ArrayType 0 (PointerType valueType (AddrSpace 0))
                 ])
-    , TypeDefinition (Name "mpz")
+    , TypeDefinition (mkName "mpz")
         (Just $ StructureType False
                   [ IntegerType 32
                   , IntegerType 32
                   , PointerType intPtr (AddrSpace 0)
                   ])
     , GlobalDefinition $ globalVariableDefaults
-      { G.name = Name "__idris_intFmtStr"
+      { G.name = mkName "__idris_intFmtStr"
       , G.linkage = L.Internal
       , G.isConstant = True
-      , G.hasUnnamedAddr = True
+      , G.unnamedAddr = Just G.GlobalAddr
       , G.type' = ArrayType 5 (IntegerType 8)
       , G.initializer = Just $ C.Array (IntegerType 8) (map (C.Int 8 . fromIntegral . fromEnum) "%lld" ++ [C.Int 8 0])
       }
@@ -210,46 +207,46 @@ initDefs tgt =
         [ BasicBlock (UnName 0)
           [ UnName 1 := simpleCall "GC_malloc_atomic" [ConstantOperand (C.Int (tgtWordSize tgt) 21)]
           , UnName 2 := simpleCall "snprintf"
-                       [ LocalReference (UnName 1)
+                       [ LocalReference ptrI8 (UnName 1)
                        , ConstantOperand (C.Int (tgtWordSize tgt) 21)
-                       , ConstantOperand $ C.GetElementPtr True (C.GlobalReference . Name $ "__idris_intFmtStr") [C.Int 32 0, C.Int 32 0]
-                       , LocalReference (UnName 0)
+                       , ConstantOperand $ C.GetElementPtr True (glRef "__idris_intFmtStr") [C.Int 32 0, C.Int 32 0]
+                       , LocalReference f64 (UnName 0)
                        ]
           ]
-          (Do $ Ret (Just (LocalReference (UnName 1))) [])
+          (Do $ Ret (Just (LocalReference ptrI8 (UnName 1))) [])
         ]
     , GlobalDefinition $ globalVariableDefaults
-      { G.name = Name "__idris_floatFmtStr"
+      { G.name = mkName "__idris_floatFmtStr"
       , G.linkage = L.Internal
       , G.isConstant = True
-      , G.hasUnnamedAddr = True
-      , G.type' = ArrayType 5 (IntegerType 8)
+      , G.unnamedAddr = Just G.GlobalAddr
+      , G.type' = ArrayType 3 (IntegerType 8)
       , G.initializer = Just $ C.Array (IntegerType 8) (map (C.Int 8 . fromIntegral . fromEnum) "%g" ++ [C.Int 8 0])
       }
-    , rtsFun "floatStr" ptrI8 [FloatingPointType 64 IEEE]
+    , rtsFun "floatStr" ptrI8 [f64]
         [ BasicBlock (UnName 0)
           [ UnName 1 := simpleCall "GC_malloc_atomic" [ConstantOperand (C.Int (tgtWordSize tgt) 21)]
           , UnName 2 := simpleCall "snprintf"
-                       [ LocalReference (UnName 1)
+                       [ LocalReference ptrI8 (UnName 1)
                        , ConstantOperand (C.Int (tgtWordSize tgt) 21)
-                       , ConstantOperand $ C.GetElementPtr True (C.GlobalReference . Name $ "__idris_floatFmtStr") [C.Int 32 0, C.Int 32 0]
-                       , LocalReference (UnName 0)
+                       , ConstantOperand $ C.GetElementPtr True (glRef "__idris_floatFmtStr") [C.Int 32 0, C.Int 32 0]
+                       , LocalReference f64 (UnName 0)
                        ]
           ]
-          (Do $ Ret (Just (LocalReference (UnName 1))) [])
+          (Do $ Ret (Just (LocalReference ptrI8 (UnName 1))) [])
         ]
-    , exfun "llvm.sin.f64" (FloatingPointType 64 IEEE) [ FloatingPointType 64 IEEE ] False
-    , exfun "llvm.cos.f64" (FloatingPointType 64 IEEE) [ FloatingPointType 64 IEEE ] False
-    , exfun "llvm.pow.f64"  (FloatingPointType 64 IEEE) [ FloatingPointType 64 IEEE ] False
-    , exfun "llvm.ceil.f64" (FloatingPointType 64 IEEE) [ FloatingPointType 64 IEEE ] False
-    , exfun "llvm.floor.f64" (FloatingPointType 64 IEEE) [ FloatingPointType 64 IEEE ] False
-    , exfun "llvm.exp.f64" (FloatingPointType 64 IEEE) [ FloatingPointType 64 IEEE ] False
-    , exfun "llvm.log.f64" (FloatingPointType 64 IEEE) [ FloatingPointType 64 IEEE ] False
-    , exfun "llvm.sqrt.f64" (FloatingPointType 64 IEEE) [ FloatingPointType 64 IEEE ] False
-    , exfun "tan" (FloatingPointType 64 IEEE) [ FloatingPointType 64 IEEE ] False
-    , exfun "asin" (FloatingPointType 64 IEEE) [ FloatingPointType 64 IEEE ] False
-    , exfun "acos" (FloatingPointType 64 IEEE) [ FloatingPointType 64 IEEE ] False
-    , exfun "atan" (FloatingPointType 64 IEEE) [ FloatingPointType 64 IEEE ] False
+    , exfun "llvm.sin.f64" (f64) [ f64 ] False
+    , exfun "llvm.cos.f64" (f64) [ f64 ] False
+    , exfun "llvm.pow.f64"  (f64) [ f64 ] False
+    , exfun "llvm.ceil.f64" (f64) [ f64 ] False
+    , exfun "llvm.floor.f64" (f64) [ f64 ] False
+    , exfun "llvm.exp.f64" (f64) [ f64 ] False
+    , exfun "llvm.log.f64" (f64) [ f64 ] False
+    , exfun "llvm.sqrt.f64" (f64) [ f64 ] False
+    , exfun "tan" (f64) [ f64 ] False
+    , exfun "asin" (f64) [ f64 ] False
+    , exfun "acos" (f64) [ f64 ] False
+    , exfun "atan" (f64) [ f64 ] False
     , exfun "llvm.trap" VoidType [] False
     -- , exfun "llvm.llvm.memcpy.p0i8.p0i8.i32" VoidType [ptrI8, ptrI8, IntegerType 32, IntegerType 32, IntegerType 1] False
     -- , exfun "llvm.llvm.memcpy.p0i8.p0i8.i64" VoidType [ptrI8, ptrI8, IntegerType 64, IntegerType 32, IntegerType 1] False
@@ -273,8 +270,8 @@ initDefs tgt =
     , exfun "__gmpz_cmp" (IntegerType 32) [pmpz, pmpz] False
     , exfun "__gmpz_fdiv_q_2exp" VoidType [pmpz, pmpz, intPtr] False
     , exfun "__gmpz_mul_2exp" VoidType [pmpz, pmpz, intPtr] False
-    , exfun "__gmpz_get_d" (FloatingPointType 64 IEEE) [pmpz] False
-    , exfun "__gmpz_set_d" VoidType [pmpz, FloatingPointType 64 IEEE] False
+    , exfun "__gmpz_get_d" (f64) [pmpz] False
+    , exfun "__gmpz_set_d" VoidType [pmpz, f64] False
     , exfun "mpz_get_ull" (IntegerType 64) [pmpz] False
     , exfun "mpz_init_set_ull" VoidType [pmpz, IntegerType 64] False
     , exfun "mpz_init_set_sll" VoidType [pmpz, IntegerType 64] False
@@ -285,7 +282,7 @@ initDefs tgt =
     , exfun "__idris_gmpFree" VoidType [ptrI8, intPtr] False
     , exfun "__idris_strRev" ptrI8 [ptrI8] False
     , exfun "strtoll" (IntegerType 64) [ptrI8, PointerType ptrI8 (AddrSpace 0), IntegerType 32] False
-    , exfun "strtod" (FloatingPointType 64 IEEE) [ptrI8, PointerType ptrI8 (AddrSpace 0)] False
+    , exfun "strtod" (f64) [ptrI8, PointerType ptrI8 (AddrSpace 0)] False
     , exfun "putErr" VoidType [ptrI8] False
     , exVar (stdinName tgt) ptrI8
     , exVar (stdoutName tgt) ptrI8
@@ -296,9 +293,6 @@ initDefs tgt =
     ] ++ map mpzBinFun ["add", "sub", "mul", "fdiv_q", "fdiv_r", "and", "ior", "xor"]
     where
       intPtr = IntegerType (tgtWordSize tgt)
-      ptrI8 = PointerType (IntegerType 8) (AddrSpace 0)
-      pmpz = PointerType mpzTy (AddrSpace 0)
-
       mpzBinFun n = exfun ("__gmpz_" ++ n) VoidType [pmpz, pmpz, pmpz] False
 
       rtsFun :: String -> Type -> [Type] -> [BasicBlock] -> Definition
@@ -307,7 +301,7 @@ initDefs tgt =
                                { G.linkage = L.Internal
                                , G.returnType = rty
                                , G.parameters = (flip map argtys $ \ty -> Parameter ty (UnName 0) [], False)
-                               , G.name = Name $ "__idris_" ++ name
+                               , G.name = mkName $ "__idris_" ++ name
                                , G.basicBlocks = def
                                }
 
@@ -315,24 +309,34 @@ initDefs tgt =
       exfun name rty argtys vari =
           GlobalDefinition $ functionDefaults
                                { G.returnType = rty
-                               , G.name = Name name
+                               , G.name = mkName name
                                , G.parameters = (flip map argtys $ \ty -> Parameter ty (UnName 0) [], vari)
                                }
       exVar :: String -> Type -> Definition
-      exVar name ty = GlobalDefinition $ globalVariableDefaults { G.name = Name name, G.type' = ty }
+      exVar name ty = GlobalDefinition $ globalVariableDefaults { G.name = mkName name, G.type' = ty }
+
+getStream :: (Target -> String) -> Codegen Operand
+getStream f = do i <- asks target
+                 return $ globalRef (f i)
 
 getStdIn, getStdOut, getStdErr :: Codegen Operand
-getStdIn  = ConstantOperand . C.GlobalReference . Name . stdinName <$> asks target
-getStdOut = ConstantOperand . C.GlobalReference . Name . stdoutName <$> asks target
-getStdErr = ConstantOperand . C.GlobalReference . Name . stderrName <$> asks target
+getStdIn  = getStream stdinName
+getStdOut = getStream stdoutName
+getStdErr = getStream stderrName
 
-codegen :: Target -> [SDecl] -> Module
-codegen tgt defs = Module "idris" (Just . dataLayout $ tgt) (Just . triple $ tgt) (initDefs tgt ++ globals ++ gendefs)
+codegen :: String -> Target -> [SDecl] -> Module
+codegen file tgt defs = Module {
+      moduleName = "idris",
+      moduleSourceFileName = fromString file,
+      moduleDataLayout = Just . dataLayout $ tgt,
+      moduleTargetTriple = Just (fromString $ triple tgt), 
+      moduleDefinitions = initDefs tgt ++ globals ++ gendefs
+    }
     where
       (gendefs, _, globals) = runRWS (mapM cgDef defs) tgt initialMGS
 
 valueType :: Type
-valueType = NamedTypeReference (Name "valTy")
+valueType = NamedTypeReference (mkName "valTy")
 
 nullValue :: C.Constant
 nullValue = C.Null (PointerType valueType (AddrSpace 0))
@@ -341,7 +345,10 @@ primTy :: Type -> Type
 primTy inner = StructureType False [IntegerType 32, inner]
 
 mpzTy :: Type
-mpzTy = NamedTypeReference (Name "mpz")
+mpzTy = NamedTypeReference (mkName "mpz")
+
+tyRef :: String -> Type
+tyRef = NamedTypeReference . mkName
 
 conType :: Word64 -> Type
 conType nargs = StructureType False
@@ -370,8 +377,8 @@ cgDef (SFun name argNames _ expr) = do
                      case r of
                        Nothing -> terminate $ Unreachable []
                        Just r' -> terminate $ Ret (Just r') [])
-                 (CGR tgt (show name))
-                 (CGS 0 nextGlobal (Name "begin") [] (map (Just . LocalReference . Name . show) argNames) existingForeignSyms)
+                 (CGR tgt (TT.showCG name))
+                 (CGS 0 nextGlobal (mkName "begin") [] (map ((\n -> Just (LocalReference (NamedTypeReference n) n)) . mkName . TT.showCG) argNames) existingForeignSyms)
       entryTerm = case bbs of
                     [] -> Do $ Ret Nothing []
                     BasicBlock n _ _:_ -> Do $ Br n []
@@ -380,13 +387,13 @@ cgDef (SFun name argNames _ expr) = do
   return . GlobalDefinition $ functionDefaults
              { G.linkage = L.Internal
              , G.callingConvention = CC.Fast
-             , G.name = Name (show name)
+             , G.name = mkName (TT.showCG name)
              , G.returnType = PointerType valueType (AddrSpace 0)
              , G.parameters = (flip map argNames $ \argName ->
-                                   Parameter (PointerType valueType (AddrSpace 0)) (Name (show argName)) []
+                                   Parameter (PointerType valueType (AddrSpace 0)) (mkName (TT.showCG argName)) []
                               , False)
              , G.basicBlocks =
-                 BasicBlock (Name "entry")
+                 BasicBlock (mkName "entry")
                                  (map (\(n, t) -> n := Alloca t Nothing 0 []) allocas)
                                  entryTerm
                  : bbs
@@ -428,7 +435,7 @@ getName :: String -> Codegen Name
 getName n = do
   i <- gets nextName
   modify $ \s -> s { nextName = 1 + i }
-  return (Name $ n ++ show i)
+  return (mkName $ n ++ show i)
 
 alloca :: Name -> Type -> Codegen ()
 alloca n t = tell ([(n, t)], [], [])
@@ -450,13 +457,13 @@ inst :: Instruction -> Codegen Operand
 inst i = do
   n <- getUnName
   modify $ \s -> s { instAccum = instAccum s ++ [n := i] }
-  return $ LocalReference n
+  return $ LocalReference (NamedTypeReference n) n
 
 ninst :: String -> Instruction -> Codegen Operand
 ninst name i = do
   n <- getName name
   modify $ \s -> s { instAccum = instAccum s ++ [n := i] }
-  return $ LocalReference n
+  return $ LocalReference (NamedTypeReference n) n
 
 inst' :: Instruction -> Codegen ()
 inst' i = modify $ \s -> s { instAccum = instAccum s ++ [Do i] }
@@ -466,7 +473,7 @@ insts is = modify $ \s -> s { instAccum = instAccum s ++ is }
 
 var :: LVar -> Codegen (Maybe Operand)
 var (Loc level) = (!! level) <$> gets lexenv
-var (Glob n) = return . Just . ConstantOperand . C.GlobalReference . Name $ show n
+var (Glob n) = return $ Just (globalRef (TT.showCG n))
 
 binds :: Env -> Codegen (Maybe Operand) -> Codegen (Maybe Operand)
 binds vals cg = do
@@ -522,7 +529,8 @@ cgExpr (SApp tailcall fname args) = do
     Nothing -> return Nothing
     Just argVals -> do
       fn <- var (Glob fname)
-      Just <$> inst ((idrCall (show fname) argVals) { isTailCall = tailcall })
+      Just <$> inst ((idrCall (TT.showCG fname) argVals)
+               { tailCallKind = if tailcall then Just Tail else Nothing })
 cgExpr (SLet _ varExpr bodyExpr) = do
   val <- cgExpr varExpr
   binds [val] $ cgExpr bodyExpr
@@ -594,18 +602,18 @@ cgExpr (SProj conVar idx) = do
                   ] []
            Just <$> inst (Load False ptr Nothing 0 [])
 cgExpr (SConst c) = Just <$> cgConst c
-cgExpr (SForeign LANG_C rty fname args) = do
-  func <- ensureCDecl fname rty (map fst args)
+cgExpr (SForeign rty (FStr fname) args) = do
+  func <- ensureCDecl fname (toFType rty) (map (toFType . fst) args)
   argVals <- forM args $ \(fty, v) -> do
                v' <- var v
                case v' of
-                 Just val -> return $ Just (fty, val)
+                 Just val -> return $ Just (toFType fty, val)
                  Nothing -> return Nothing
   case sequence argVals of
     Nothing -> return Nothing
     Just argVals' -> do
       argUVals <- mapM (uncurry unbox) argVals'
-      result <- inst Call { isTailCall = False
+      result <- inst Call { tailCallKind = Nothing
                           , callingConvention = CC.C
                           , returnAttributes = []
                           , function = Right func
@@ -613,7 +621,7 @@ cgExpr (SForeign LANG_C rty fname args) = do
                           , functionAttributes = []
                           , metadata = []
                           }
-      Just <$> box rty result
+      Just <$> box (toFType rty) result
 cgExpr (SOp fn args) = do
   argVals <- mapM var args
   case sequence argVals of
@@ -625,12 +633,12 @@ cgExpr (SError msg) = do
          (cgConst' (TT.Str (msg ++ "\n")))
   inst' $ simpleCall "putErr" [ConstantOperand $ C.GetElementPtr True str [ C.Int 32 0
                                                                           , C.Int 32 0]]
-  inst' Call { isTailCall = True
+  inst' Call { tailCallKind = Just Tail
              , callingConvention = CC.C
              , returnAttributes = []
-             , function = Right . ConstantOperand . C.GlobalReference . Name $ "llvm.trap"
+             , function = Right $ globalRef "llvm.trap"
              , arguments = []
-             , functionAttributes = [A.NoReturn]
+             , functionAttributes = [Right A.NoReturn]
              , metadata = []
              }
   return Nothing
@@ -667,7 +675,7 @@ cgPrimCase caseValPtr defExp alts = do
                  SConstCase (TT.B16 _) _ -> IntegerType 16
                  SConstCase (TT.B32 _) _ -> IntegerType 32
                  SConstCase (TT.B64 _) _ -> IntegerType 64
-                 SConstCase (TT.Fl _)  _ -> FloatingPointType 64 IEEE
+                 SConstCase (TT.Fl _)  _ -> f64
                  SConstCase (TT.Ch _)  _ -> IntegerType 32
   realPtr <- inst $ BitCast caseValPtr (PointerType (primTy caseTy) (AddrSpace 0)) []
   valPtr <- inst $ GetElementPtr True realPtr [ConstantOperand (C.Int 32 0), ConstantOperand (C.Int 32 1)] []
@@ -832,10 +840,10 @@ cgConst' (TT.B8  i) = C.Int 8  (fromIntegral i)
 cgConst' (TT.B16 i) = C.Int 16 (fromIntegral i)
 cgConst' (TT.B32 i) = C.Int 32 (fromIntegral i)
 cgConst' (TT.B64 i) = C.Int 64 (fromIntegral i)
-cgConst' (TT.B8V  v) = C.Vector (map ((C.Int  8) . fromIntegral) . V.toList $ v)
-cgConst' (TT.B16V v) = C.Vector (map ((C.Int 16) . fromIntegral) . V.toList $ v)
-cgConst' (TT.B32V v) = C.Vector (map ((C.Int 32) . fromIntegral) . V.toList $ v)
-cgConst' (TT.B64V v) = C.Vector (map ((C.Int 64) . fromIntegral) . V.toList $ v)
+-- cgConst' (TT.B8V  v) = C.Vector (map ((C.Int  8) . fromIntegral) . V.toList $ v)
+-- cgConst' (TT.B16V v) = C.Vector (map ((C.Int 16) . fromIntegral) . V.toList $ v)
+-- cgConst' (TT.B32V v) = C.Vector (map ((C.Int 32) . fromIntegral) . V.toList $ v)
+-- cgConst' (TT.B64V v) = C.Vector (map ((C.Int 64) . fromIntegral) . V.toList $ v)
 
 cgConst' (TT.BI i) = C.Array (IntegerType 8) (map (C.Int 8 . fromIntegral . fromEnum) (show i) ++ [C.Int 8 0])
 cgConst' (TT.Fl f) = C.Float (F.Double f)
@@ -849,10 +857,10 @@ cgConst c@(TT.B8  _) = box (FArith (ATInt (ITFixed IT8))) (ConstantOperand $ cgC
 cgConst c@(TT.B16 _) = box (FArith (ATInt (ITFixed IT16))) (ConstantOperand $ cgConst' c)
 cgConst c@(TT.B32 _) = box (FArith (ATInt (ITFixed IT32))) (ConstantOperand $ cgConst' c)
 cgConst c@(TT.B64 _) = box (FArith (ATInt (ITFixed IT64))) (ConstantOperand $ cgConst' c)
-cgConst c@(TT.B8V  v) = box (FArith (ATInt (ITVec IT8  (V.length v)))) (ConstantOperand $ cgConst' c)
-cgConst c@(TT.B16V v) = box (FArith (ATInt (ITVec IT16 (V.length v)))) (ConstantOperand $ cgConst' c)
-cgConst c@(TT.B32V v) = box (FArith (ATInt (ITVec IT32 (V.length v)))) (ConstantOperand $ cgConst' c)
-cgConst c@(TT.B64V v) = box (FArith (ATInt (ITVec IT64 (V.length v)))) (ConstantOperand $ cgConst' c)
+-- cgConst c@(TT.B8V  v) = box (FArith (ATInt (ITVec IT8  (V.length v)))) (ConstantOperand $ cgConst' c)
+-- cgConst c@(TT.B16V v) = box (FArith (ATInt (ITVec IT16 (V.length v)))) (ConstantOperand $ cgConst' c)
+-- cgConst c@(TT.B32V v) = box (FArith (ATInt (ITVec IT32 (V.length v)))) (ConstantOperand $ cgConst' c)
+-- cgConst c@(TT.B64V v) = box (FArith (ATInt (ITVec IT64 (V.length v)))) (ConstantOperand $ cgConst' c)
 cgConst c@(TT.Fl _) = box (FArith ATFloat) (ConstantOperand $ cgConst' c)
 cgConst c@(TT.Ch _) = box (FArith (ATInt ITChar)) (ConstantOperand $ cgConst' c)
 cgConst c@(TT.Str s) = do
@@ -885,12 +893,12 @@ addGlobal' ty val = do
   addGlobal $ globalVariableDefaults
                 { G.name = name
                 , G.linkage = L.Internal
-                , G.hasUnnamedAddr = True
+                , G.unnamedAddr = Just G.GlobalAddr
                 , G.isConstant = True
                 , G.type' = ty
                 , G.initializer = Just val
                 }
-  return . C.GlobalReference $ name
+  return $ C.GlobalReference ty name
 
 
 ensureCDecl :: String -> FType -> [FType] -> Codegen Operand
@@ -901,13 +909,13 @@ ensureCDecl name rty argtys = do
                   modify $ \s -> s { foreignSyms = M.insert name (rty, argtys) (foreignSyms s) }
     Just (rty', argtys') -> unless (rty == rty' && argtys == argtys') . fail $
                             "Mismatched type declarations for foreign symbol \"" ++ name ++ "\": " ++ show (rty, argtys) ++ " vs " ++ show (rty', argtys')
-  return $ ConstantOperand (C.GlobalReference (Name name))
+  return $ globalRef name
 
 ffunDecl :: String -> FType -> [FType] -> Global
 ffunDecl name rty argtys =
     functionDefaults
     { G.returnType = ftyToTy rty
-    , G.name = Name name
+    , G.name = mkName name
     , G.parameters = (flip map argtys $ \fty ->
                           Parameter (ftyToTy fty) (UnName 0) []
                      , False)
@@ -917,10 +925,10 @@ ftyToTy :: FType -> Type
 ftyToTy (FArith (ATInt ITNative)) = IntegerType 32
 ftyToTy (FArith (ATInt ITBig)) = PointerType mpzTy (AddrSpace 0)
 ftyToTy (FArith (ATInt (ITFixed ty))) = IntegerType (fromIntegral $ nativeTyWidth ty)
-ftyToTy (FArith (ATInt (ITVec e c)))
-    = VectorType (fromIntegral c) (IntegerType (fromIntegral $ nativeTyWidth e))
+-- ftyToTy (FArith (ATInt (ITVec e c)))
+--     = VectorType (fromIntegral c) (IntegerType (fromIntegral $ nativeTyWidth e))
 ftyToTy (FArith (ATInt ITChar)) = IntegerType 32
-ftyToTy (FArith ATFloat) = FloatingPointType 64 IEEE
+ftyToTy (FArith ATFloat) = f64
 ftyToTy FString = PointerType (IntegerType 8) (AddrSpace 0)
 ftyToTy FUnit = VoidType
 ftyToTy FPtr = PointerType (IntegerType 8) (AddrSpace 0)
@@ -937,7 +945,7 @@ itConst :: IntTy -> Integer -> C.Constant
 itConst (ITFixed n) x = C.Int (fromIntegral $ nativeTyWidth n) x
 itConst ITNative x = itConst (ITFixed IT32) x
 itConst ITChar x = itConst (ITFixed IT32) x
-itConst (ITVec elts size) x = C.Vector (replicate size (itConst (ITFixed elts) x))
+-- itConst (ITVec elts size) x = C.Vector (replicate size (itConst (ITFixed elts) x))
 
 cgOp :: PrimFn -> [Operand] -> Codegen Operand
 cgOp (LTrunc ITBig ity) [x] = do
@@ -1035,10 +1043,10 @@ cgOp (LSLe   ATFloat) [x,y] = fCmp FPred.OLE x y
 cgOp (LEq    ATFloat) [x,y] = fCmp FPred.OEQ x y
 cgOp (LSGe   ATFloat) [x,y] = fCmp FPred.OGE x y
 cgOp (LSGt   ATFloat) [x,y] = fCmp FPred.OGT x y
-cgOp (LPlus  ATFloat) [x,y] = binary ATFloat x y FAdd
-cgOp (LMinus ATFloat) [x,y] = binary ATFloat x y FSub
-cgOp (LTimes ATFloat) [x,y] = binary ATFloat x y FMul 
-cgOp (LSDiv  ATFloat) [x,y] = binary ATFloat x y FDiv
+cgOp (LPlus  ATFloat) [x,y] = binary ATFloat x y (FAdd NoFastMathFlags)
+cgOp (LMinus ATFloat) [x,y] = binary ATFloat x y (FSub NoFastMathFlags)
+cgOp (LTimes ATFloat) [x,y] = binary ATFloat x y (FMul NoFastMathFlags) 
+cgOp (LSDiv  ATFloat) [x,y] = binary ATFloat x y (FDiv NoFastMathFlags)
 
 cgOp LFExp   [x] = nunary ATFloat "llvm.exp.f64" x 
 cgOp LFLog   [x] = nunary ATFloat "llvm.log.f64" x
@@ -1053,7 +1061,7 @@ cgOp LFFloor [x] = nunary ATFloat "llvm.floor.f64" x
 cgOp LFCeil  [x] = nunary ATFloat "llvm.ceil.f64" x
 cgOp LFNegate [x] = do
 	z <- box (FArith ATFloat) (ConstantOperand $ C.Float $ F.Double (-0.0))	
-	binary ATFloat z x FSub
+	binary ATFloat z x (FSub NoFastMathFlags)
 
 cgOp (LIntFloat ITBig) [x] = do
   x' <- unbox (FArith (ATInt ITBig)) x
@@ -1062,7 +1070,7 @@ cgOp (LIntFloat ITBig) [x] = do
 
 cgOp (LIntFloat ity) [x] = do
   x' <- unbox (FArith (ATInt ity)) x
-  x'' <- inst $ SIToFP x' (FloatingPointType 64 IEEE) []
+  x'' <- inst $ SIToFP x' (f64) []
   box (FArith ATFloat) x''
 
 cgOp (LFloatInt ITBig) [x] = do
@@ -1092,26 +1100,26 @@ cgOp LStrFloat [s] = do
 
 cgOp LNoOp xs = return $ last xs
 
-cgOp (LMkVec ety c) xs | c == length xs = do
-  nxs <- mapM (unbox (FArith (ATInt (ITFixed ety)))) xs
-  vec <- foldM (\v (e, i) -> inst $ InsertElement v e (ConstantOperand (C.Int 32 i)) [])
-               (ConstantOperand $ C.Vector (replicate c (C.Undef (IntegerType . fromIntegral $ nativeTyWidth ety))))
-               (zip nxs [0..])
-  box (FArith (ATInt (ITVec ety c))) vec
+-- cgOp (LMkVec ety c) xs | c == length xs = do
+--   nxs <- mapM (unbox (FArith (ATInt (ITFixed ety)))) xs
+--   vec <- foldM (\v (e, i) -> inst $ InsertElement v e (ConstantOperand (C.Int 32 i)) [])
+--                (ConstantOperand $ C.Vector (replicate c (C.Undef (IntegerType . fromIntegral $ nativeTyWidth ety))))
+--                (zip nxs [0..])
+--   box (FArith (ATInt (ITVec ety c))) vec
 
-cgOp (LIdxVec ety c) [v,i] = do
-  nv <- unbox (FArith (ATInt (ITVec ety c))) v
-  ni <- unbox (FArith (ATInt (ITFixed IT32))) i
-  elt <- inst $ ExtractElement nv ni []
-  box (FArith (ATInt (ITFixed ety))) elt
+-- cgOp (LIdxVec ety c) [v,i] = do
+--   nv <- unbox (FArith (ATInt (ITVec ety c))) v
+--   ni <- unbox (FArith (ATInt (ITFixed IT32))) i
+--   elt <- inst $ ExtractElement nv ni []
+--   box (FArith (ATInt (ITFixed ety))) elt
 
-cgOp (LUpdateVec ety c) [v,i,e] = do
-  let fty = FArith (ATInt (ITVec ety c))
-  nv <- unbox fty v
-  ni <- unbox (FArith (ATInt (ITFixed IT32))) i
-  ne <- unbox (FArith (ATInt (ITFixed ety))) e
-  nv' <- inst $ InsertElement nv ne ni []
-  box fty nv'
+-- cgOp (LUpdateVec ety c) [v,i,e] = do
+--   let fty = FArith (ATInt (ITVec ety c))
+--   nv <- unbox fty v
+--   ni <- unbox (FArith (ATInt (ITFixed IT32))) i
+--   ne <- unbox (FArith (ATInt (ITFixed ety))) e
+--   nv' <- inst $ InsertElement nv ne ni []
+--   box fty nv'
 
 cgOp (LBitCast from to) [x] = do
   nx <- unbox (FArith from) x
@@ -1212,24 +1220,31 @@ cgOp LReadStr [p] = do
   s <- inst $ simpleCall "__idris_readStr" [np]
   box FString s
 
-cgOp LStdIn  [] = do
-  stdin <- getStdIn
-  ptr <- inst $ loadInv stdin
-  box FPtr ptr
-cgOp LStdOut  [] = do
-  stdout <- getStdOut
-  ptr <- inst $ loadInv stdout
-  box FPtr ptr
-cgOp LStdErr  [] = do
-  stdErr <- getStdErr
-  ptr <- inst $ loadInv stdErr
-  box FPtr ptr
 
-cgOp LNullPtr [] = box FPtr (ConstantOperand $ C.Null (PointerType (IntegerType 8) (AddrSpace 0)))
+-- TODO: ignored primitives, fill in
+cgOp LWriteStr xs = return ignore
+cgOp (LExternal pk) xs = return ignore
+
+--  cgOp LStdIn  [] = do
+--   stdin <- getStdIn
+--   ptr <- inst $ loadInv stdin
+--   box FPtr ptr
+-- cgOp LStdOut  [] = do
+--   stdout <- getStdOut
+--   ptr <- inst $ loadInv stdout
+--   box FPtr ptr
+-- cgOp LStdErr  [] = do
+--   stdErr <- getStdErr
+--   ptr <- inst $ loadInv stdErr
+--   box FPtr ptr
+
+-- cgOp LNullPtr [] = box FPtr (ConstantOperand $ C.Null (PointerType (IntegerType 8) (AddrSpace 0)))
 
 cgOp prim args = ierror $ "Unimplemented primitive: <" ++ show prim ++ ">("
                   ++ intersperse ',' (take (length args) ['a'..]) ++ ")"
 
+
+ignore = ConstantOperand nullValue
 iCoerce :: (Operand -> Type -> InstructionMetadata -> Instruction) -> NativeTy -> NativeTy -> Operand -> Codegen Operand
 iCoerce _ from to x | from == to = return x
 iCoerce operator from to x = do
@@ -1296,7 +1311,7 @@ fCmp pred x y = do
   box (FArith (ATInt (ITFixed IT32))) nr
 
 cmpResultTy :: IntTy -> FType
-cmpResultTy v@(ITVec _ _) = FArith (ATInt v)
+-- cmpResultTy v@(ITVec _ _) = FArith (ATInt v)
 cmpResultTy _ = FArith (ATInt (ITFixed IT32))
 
 mpzBin :: String -> Operand -> Operand -> Codegen Operand
@@ -1335,12 +1350,36 @@ mpzCmp pred x y = do
   i <- inst $ ZExt result (IntegerType 32) []
   box (FArith (ATInt (ITFixed IT32))) i
 
+
+-- Deconstruct the Foreign type in the defunctionalised expression and build
+-- a foreign type description for c_irts and irts_c
+toAType (FCon i) 
+    | i == sUN "C_IntChar" = ATInt ITChar
+    | i == sUN "C_IntNative" = ATInt ITNative
+    | i == sUN "C_IntBits8" = ATInt (ITFixed IT8)
+    | i == sUN "C_IntBits16" = ATInt (ITFixed IT16)
+    | i == sUN "C_IntBits32" = ATInt (ITFixed IT32)
+    | i == sUN "C_IntBits64" = ATInt (ITFixed IT64)
+toAType t = error (show t ++ " not defined in toAType")
+
+toFType (FCon c) 
+    | c == sUN "C_Str" = FString
+    | c == sUN "C_Float" = FArith ATFloat
+    | c == sUN "C_Ptr" = FPtr
+    | c == sUN "C_MPtr" = FManagedPtr
+    | c == sUN "C_Unit" = FUnit
+toFType (FApp c [_,ity]) 
+    | c == sUN "C_IntT" = FArith (toAType ity)
+toFType (FApp c [_]) 
+    | c == sUN "C_Any" = FAny
+toFType t = FAny
+
 simpleCall :: String -> [Operand] -> Instruction
 simpleCall name args =
-    Call { isTailCall = False
+    Call { tailCallKind = Nothing
          , callingConvention = CC.C
          , returnAttributes = []
-         , function = Right . ConstantOperand . C.GlobalReference . Name $ name
+         , function = Right $ globalRef name
          , arguments = map (\x -> (x, [])) args
          , functionAttributes = []
          , metadata = []
@@ -1348,10 +1387,10 @@ simpleCall name args =
 
 idrCall :: String -> [Operand] -> Instruction
 idrCall name args =
-    Call { isTailCall = False
+    Call { tailCallKind = Nothing
          , callingConvention = CC.Fast
          , returnAttributes = []
-         , function = Right . ConstantOperand . C.GlobalReference . Name $ name
+         , function = Right $ globalRef name
          , arguments = map (\x -> (x, [])) args
          , functionAttributes = []
          , metadata = []

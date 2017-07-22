@@ -1,31 +1,33 @@
 Name:           idris-llvm
-Version:        0.0.0.1
+Version:        0.0.0.2
 License:        BSD3
 License-file:   LICENSE
 Author:         Benjamin Saunders
-Maintainer:	Markus Pfeiffer <mp397@st-andrews.ac.uk>
+Maintainer:	Niklas Larsson <niklas@mm.st>
 Build-Type:	Custom
 Cabal-Version:  >= 1.8
 Extra-source-files:
 		llvm/Makefile
 		llvm/*.c
 
-Executable idris-llvm
+Executable idris-codegen-llvm
   Main-is:        Main.hs
   hs-source-dirs: src
 
   Build-depends:  idris
                 , base
+                , bytestring
                 , containers
                 , directory
                 , filepath
                 , haskeline >= 0.7
                 , mtl
                 , process
+                , text
                 , transformers
                 , vector
-                , llvm-general == 3.3.8.*
-                , llvm-general-pure == 3.3.8.*
+                , llvm-hs
+                , llvm-hs-pure
 
   other-modules: IRTS.CodegenLLVM
   cpp-options:   -DIDRIS_LLVM
