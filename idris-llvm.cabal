@@ -1,9 +1,9 @@
 Name:           idris-llvm
-Version:        0.0.0.1
+Version:        0.0.0.2
 License:        BSD3
 License-file:   LICENSE
 Author:         Benjamin Saunders
-Maintainer:	Markus Pfeiffer <mp397@st-andrews.ac.uk>
+Maintainer:	Niklas Larsson <niklas@mm.st>
 Build-Type:	Custom
 Cabal-Version:  >= 1.8
 Extra-source-files:

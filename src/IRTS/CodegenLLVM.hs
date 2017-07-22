@@ -134,13 +134,6 @@ withTmpFile f = do
 ierror :: String -> a
 ierror msg = error $ "INTERNAL ERROR: IRTS.CodegenLLVM: " ++ msg
 
-mangle :: String -> String
-mangle n ="_idris_" ++ concatMap cchar n
-  where cchar x | isAlpha x || isDigit x = [x]
-                | otherwise = "_" ++ show (fromEnum x) ++ "_"
-
-cname :: TT.Name -> String
-cname n = mangle $ TT.showCG n
 
 -- Type helpers
 
@@ -185,7 +178,7 @@ mainDef =
                        (LocalReference i32 (mkName "argc")) Nothing 0 []
           , Do $ Store False (globalRef "__idris_argv") 
                        (LocalReference ppI8 (mkName "argv")) Nothing 0 []
-          , UnName 1 := idrCall (mangle "{runMain0}") [] ]
+          , UnName 1 := idrCall "{runMain_0}" [] ]
           (Do $ Ret (Just (ConstantOperand (C.Int 32 0))) [])
         ]}
 
@@ -227,7 +220,7 @@ initDefs tgt =
       , G.linkage = L.Internal
       , G.isConstant = True
       , G.unnamedAddr = Just G.GlobalAddr
-      , G.type' = ArrayType 5 (IntegerType 8)
+      , G.type' = ArrayType 3 (IntegerType 8)
       , G.initializer = Just $ C.Array (IntegerType 8) (map (C.Int 8 . fromIntegral . fromEnum) "%g" ++ [C.Int 8 0])
       }
     , rtsFun "floatStr" ptrI8 [f64]
@@ -291,7 +284,6 @@ initDefs tgt =
     , exfun "strtoll" (IntegerType 64) [ptrI8, PointerType ptrI8 (AddrSpace 0), IntegerType 32] False
     , exfun "strtod" (f64) [ptrI8, PointerType ptrI8 (AddrSpace 0)] False
     , exfun "putErr" VoidType [ptrI8] False
-    , exfun (mangle  "{runMain0}") VoidType [] False
     , exVar (stdinName tgt) ptrI8
     , exVar (stdoutName tgt) ptrI8
     , exVar (stderrName tgt) ptrI8
@@ -385,7 +377,7 @@ cgDef (SFun name argNames _ expr) = do
                      case r of
                        Nothing -> terminate $ Unreachable []
                        Just r' -> terminate $ Ret (Just r') [])
-                 (CGR tgt (cname name))
+                 (CGR tgt (TT.showCG name))
                  (CGS 0 nextGlobal (mkName "begin") [] (map ((\n -> Just (LocalReference (NamedTypeReference n) n)) . mkName . TT.showCG) argNames) existingForeignSyms)
       entryTerm = case bbs of
                     [] -> Do $ Ret Nothing []
@@ -395,7 +387,7 @@ cgDef (SFun name argNames _ expr) = do
   return . GlobalDefinition $ functionDefaults
              { G.linkage = L.Internal
              , G.callingConvention = CC.Fast
-             , G.name = mkName (cname name)
+             , G.name = mkName (TT.showCG name)
              , G.returnType = PointerType valueType (AddrSpace 0)
              , G.parameters = (flip map argNames $ \argName ->
                                    Parameter (PointerType valueType (AddrSpace 0)) (mkName (TT.showCG argName)) []
@@ -481,7 +473,7 @@ insts is = modify $ \s -> s { instAccum = instAccum s ++ is }
 
 var :: LVar -> Codegen (Maybe Operand)
 var (Loc level) = (!! level) <$> gets lexenv
-var (Glob n) = return $ Just (globalRef (cname n))
+var (Glob n) = return $ Just (globalRef (TT.showCG n))
 
 binds :: Env -> Codegen (Maybe Operand) -> Codegen (Maybe Operand)
 binds vals cg = do
@@ -537,8 +529,8 @@ cgExpr (SApp tailcall fname args) = do
     Nothing -> return Nothing
     Just argVals -> do
       fn <- var (Glob fname)
-      Just <$> inst ((idrCall (cname fname) argVals)
-               { tailCallKind = if tailcall then Just MustTail else Nothing })
+      Just <$> inst ((idrCall (TT.showCG fname) argVals)
+               { tailCallKind = if tailcall then Just Tail else Nothing })
 cgExpr (SLet _ varExpr bodyExpr) = do
   val <- cgExpr varExpr
   binds [val] $ cgExpr bodyExpr
@@ -1252,7 +1244,7 @@ cgOp prim args = ierror $ "Unimplemented primitive: <" ++ show prim ++ ">("
                   ++ intersperse ',' (take (length args) ['a'..]) ++ ")"
 
 
-ignore = MetadataOperand (MDString "ignored primitive")
+ignore = ConstantOperand nullValue
 iCoerce :: (Operand -> Type -> InstructionMetadata -> Instruction) -> NativeTy -> NativeTy -> Operand -> Codegen Operand
 iCoerce _ from to x | from == to = return x
 iCoerce operator from to x = do
