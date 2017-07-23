@@ -1,9 +1,10 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <gmp.h>
-#include <gc/gc.h>
+#include <gc.h>
 #include <string.h>
 #include <inttypes.h>
+#include "getline.h"
 
 extern char** environ;
 
@@ -62,44 +63,25 @@ char *__idris_strCons(char c, char *s) {
   return result;
 }
 
-#define BUFSIZE 256
+
 char *__idris_readStr(FILE* h) {
-// Modified from 'safe-fgets.c' in the gdb distribution.
-// (see http://www.gnu.org/software/gdb/current/)
-  char *line_ptr;
-  char* line_buf = (char *) GC_malloc (BUFSIZE);
-  int line_buf_size = BUFSIZE;
+    char *buffer = NULL;
+	size_t n = 0;
+	ssize_t len = 0;
 
-  /* points to last byte */
-  line_ptr = line_buf + line_buf_size - 1;
+	len = getline(&buffer, &n, h);
+	strtok(buffer, "\n");
 
-  /* so we can see if fgets put a 0 there */
-  *line_ptr = 1;
-  if (fgets (line_buf, line_buf_size, h) == 0)
-    return "";
-
-  /* we filled the buffer? */
-  while (line_ptr[0] == 0 && line_ptr[-1] != '\n')
-  {
-    /* Make the buffer bigger and read more of the line */
-    line_buf_size += BUFSIZE;
-    line_buf = (char *) GC_realloc (line_buf, line_buf_size);
-
-    /* points to last byte again */
-    line_ptr = line_buf + line_buf_size - 1;
-    /* so we can see if fgets put a 0 there */
-    *line_ptr = 1;
-
-    if (fgets (line_buf + line_buf_size - BUFSIZE - 1, BUFSIZE + 1, h) == 0)
-      return "";
-  }
-
-  return line_buf;
+	if (len <= 0) {
+		return "";
+	} else {
+		return buffer; 
+	}
 }
 
 char* __idris_readChars(int len, FILE* h) {
     char* buffer = (char*) GC_malloc(len);
-    int read = fgets(buffer, len, h);
+    char* read = fgets(buffer, len, h);
     if (read == 0) buffer[0] = 0;
     return buffer;
 }
