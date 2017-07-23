@@ -1228,10 +1228,7 @@ cgOp (LExternal pr) [] | pr == sUN "prim__stderr" = do
     box FPtr i
     
 cgOp (LExternal pr) [p] | pr == sUN "prim__asPtr" = return p
-cgOp (LExternal pr) [] | pr == sUN "prim__null" = do
-    ws <- getWordSize
-    zp <- inst $ IntToPtr (ConstantOperand (C.Int ws 0)) ptrI8 []
-    box FPtr zp
+cgOp (LExternal pr) [] | pr == sUN "prim__null" = box FPtr (ConstantOperand $ C.Null ptrI8)
 
 cgOp (LExternal pr) [_] | pr == sUN "prim__vm" = ignore
 cgOp (LExternal pr) [x, y] | pr == sUN "prim__eqPtr" = ptrEq x y
