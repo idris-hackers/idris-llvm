@@ -19,4 +19,4 @@ llc myprog.ll
 clang myprog.s src/rts/libidris_rts.a -lgc -lgmp
 ```
 
-This procedure is temporary, idris-llvm will do all thhe work soon.
+This procedure is temporary, idris-llvm will do all the work soon.
