@@ -10,6 +10,8 @@ If the prerequisites are met `cabal install` should be sufficient to build and i
 
 ## Usage
 
+There needs to be a clang executable available to build the programs. gcc will not work as the input files to clang are LLVM files.
+
 How to build an executable:
 ```
 idris myprog.idr --codegen llvm -o myprog
