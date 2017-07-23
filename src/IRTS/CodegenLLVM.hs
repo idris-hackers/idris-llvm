@@ -863,7 +863,7 @@ cgConst c@(TT.BI i) = do
 cgConst x = return $ ConstantOperand nullValue
 
 numDigits :: Integer -> Integer -> Integer
-numDigits b n = 1 + fst (ilog b n) where
+numDigits b n = 1 + fst (ilog b (abs n)) where
     ilog b n
         | n < b     = (0, n)
         | otherwise = let (e, r) = ilog (b*b) n
