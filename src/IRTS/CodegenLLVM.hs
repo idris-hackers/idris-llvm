@@ -1483,12 +1483,21 @@ toFType (FCon c)
     | c == sUN "C_Float" = FArith ATFloat
     | c == sUN "C_Ptr" = FPtr
     | c == sUN "C_MPtr" = FManagedPtr
+    | c == sUN "C_CData" = FCData
     | c == sUN "C_Unit" = FUnit
 toFType (FApp c [_,ity]) 
     | c == sUN "C_IntT" = FArith (toAType ity)
+    | c == sUN "C_FnT" = toFunType ity
 toFType (FApp c [_]) 
     | c == sUN "C_Any" = FAny
 toFType t = FAny
+
+toFunType (FApp c [_,ity])
+    | c == sUN "C_FnBase" = FFunction
+    | c == sUN "C_FnIO" = FFunctionIO
+toFunType (FApp c [_,_,_,ity])
+    | c == sUN "C_Fn" = toFunType ity
+toFunType _ = FAny
 
 simpleCall :: String -> [Operand] -> Instruction
 simpleCall name args =
