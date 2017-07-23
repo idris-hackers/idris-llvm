@@ -16,6 +16,7 @@ import System.FilePath
 
 import qualified LLVM
 import LLVM.Context
+import qualified LLVM.Target as Target
 import LLVM.AST
 import LLVM.AST.AddrSpace
 import LLVM.AST.DataLayout
@@ -30,6 +31,7 @@ import qualified LLVM.AST.Constant as C
 import qualified LLVM.AST.Float as F
 
 import qualified Data.ByteString as B
+import qualified Data.ByteString.Short as BS
 import Data.Char
 import Data.List
 import Data.Maybe
@@ -50,13 +52,14 @@ import Control.Monad.Error
 import qualified System.Info as SI (arch, os)
 import System.IO
 import System.Directory (removeFile)
+import System.Environment
 import System.FilePath ((</>))
 import System.Process (rawSystem)
 import System.Exit (ExitCode(..))
 import Debug.Trace
 
 data Target = Target { triple :: String, dataLayout :: DataLayout }
-type TargetMachine = String
+type Machine = String
 -- These might want to live in a different file
 
 
@@ -67,14 +70,19 @@ extraLib = ["-L/usr/local/lib"]
 extraLib = []
 #endif
 
-getIdrisLibDir = do dir <- getDataDir
-                    return $ addTrailingPathSeparator dir
+getRtsDir = do dir <- getDataDir
+               return $ addTrailingPathSeparator dir
 
 #if defined(FREEBSD) || defined(DRAGONFLY)
 extraInclude = " -I/usr/local/include"
 #else
 extraInclude = ""
 #endif
+
+-- This is dumb, but needed.
+fromSBS :: BS.ShortByteString -> String
+fromSBS = T.unpack . decodeUtf8 . BS.fromShort 
+
 
 getIncFlags = do dir <- getDataDir
                  return $ ["-I" ++ dir </> "rts", extraInclude]
@@ -97,24 +105,36 @@ codegenLLVM' :: [(TT.Name, SDecl)] ->
                 OutputType ->
                 IO ()
 codegenLLVM' defs triple cpu optimize file outty = do
+             defTrip <- Target.getDefaultTargetTriple 
              let layout = defaultDataLayout LittleEndian
-             let ast = codegen file (Target triple layout) (map snd defs)
+             let ast = codegen file (Target (fromSBS defTrip) layout) (map snd defs)
              outputModule triple file outty ast
 
 failInIO :: ErrorT String IO a -> IO a
 failInIO = either fail return <=< runErrorT
 
-outputModule :: TargetMachine -> FilePath -> OutputType -> Module -> IO ()
-outputModule _  file Raw    m = writeSource file (show m)
-outputModule tm file Object m = error "Not implemented yet"
-outputModule tm file Executable m = do
-  withContext $ \ctx ->
-    LLVM.withModuleFromAST ctx m $ \mod ->
-      LLVM.writeLLVMAssemblyToFile (LLVM.File file) mod    
+getCompiler = fromMaybe "clang" <$> lookupEnv "IDRIS_CLANG"
+
+outputModule :: Machine -> FilePath -> OutputType -> Module -> IO ()
+outputModule _  file Raw m = do   
+    withContext $ \ctx ->
+        LLVM.withModuleFromAST ctx m $ \mod ->
+            LLVM.writeLLVMAssemblyToFile (LLVM.File file) mod  
+outputModule _ file Object m = error "Not implemented yet"
+outputModule _ file Executable m = do
+    withContext $ \ctx ->
+        LLVM.withModuleFromAST ctx m $ \mod ->
+            withTmpFile ".ll" $ \tf -> do
+                LLVM.writeLLVMAssemblyToFile (LLVM.File tf) mod
+                cc <- getCompiler
+                rts <- getRtsDir
+                _ <- rawSystem cc ([tf, rts ++ "libidris_rts.a", "-lgc", "-lgmp", "-o" ++ file])
+                return ()
   
-withTmpFile :: (FilePath -> IO a) -> IO a
-withTmpFile f = do
-  (path, handle) <- tempfile ""
+  
+withTmpFile :: String -> (FilePath -> IO a) -> IO a
+withTmpFile suffix f = do
+  (path, handle) <- tempfile suffix
   hClose handle
   result <- f path
   removeFile path

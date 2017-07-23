@@ -10,13 +10,7 @@ If the prerequisites are met `cabal install` should be sufficient to build and i
 
 ## Usage
 
-At the moment idris-llvm outputs textual LLVM files that need to be manually built and linked.
-
 How to build an executable:
 ```
-idris myprog.idr --codegen llvm -o myprog.ll
-llc myprog.ll
-clang myprog.s src/rts/libidris_rts.a -lgc -lgmp
+idris myprog.idr --codegen llvm -o myprog
 ```
-
-This procedure is temporary, idris-llvm will do all the work soon.

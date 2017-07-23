@@ -12,6 +12,7 @@ import IRTS.Compiler
 import IRTS.CodegenLLVM
 import qualified IRTS.CodegenCommon as CG
 
+import LLVM.Target
 import System.Environment
 import System.Exit
 
@@ -25,9 +26,7 @@ showUsage = do putStrLn "Usage: idris-llvm <ibc-files> [-o <output-file>]"
 
 getOpts :: IO Opts
 getOpts = do xs <- getArgs
-             triple <- return $ ""
-             cpu <- return $ ""
-             return $ process (Opts [] "a.out" triple cpu) xs
+             return $ process (Opts [] "a.out" "" "") xs
   where
     process opts ("-o":o:xs) = process (opts { output = o }) xs
     process opts (x:xs) = process (opts { inputs = x:inputs opts }) xs
