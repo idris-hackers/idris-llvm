@@ -96,10 +96,18 @@ int __idris_writeStr(void* h, char* str) {
     }
 }
 
-void* __idris_registerPtr(void* p, int size) {
-    void* mp = GC_malloc(size);
-    return memcpy(mp, p, size);
+static void registerPtr_finalizer(void* obj, void* data) {
+    void* p = *obj;
+    free(p);
 }
+
+void* __idris_registerPtr(void* p, int size) {
+    void* mp = GC_malloc(sizeof(p));
+    memcpy(mp, &p, sizeof(p));
+    GC_register_finalizer(mp, registerPtr_finalizer, NULL, NULL, NULL);
+    return mp;
+}
+
 
 
 int __idris_sizeofPtr(void) {

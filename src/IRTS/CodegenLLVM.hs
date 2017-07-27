@@ -257,8 +257,6 @@ initDefs tgt =
     , exfun "acos" (f64) [ f64 ] False
     , exfun "atan" (f64) [ f64 ] False
     , exfun "llvm.trap" VoidType [] False
-    -- , exfun "llvm.llvm.memcpy.p0i8.p0i8.i32" VoidType [ptrI8, ptrI8, IntegerType 32, IntegerType 32, IntegerType 1] False
-    -- , exfun "llvm.llvm.memcpy.p0i8.p0i8.i64" VoidType [ptrI8, ptrI8, IntegerType 64, IntegerType 32, IntegerType 1] False
     , exfun "memcpy" ptrI8 [ptrI8, ptrI8, intPtr] False
     , exfun "llvm.invariant.start" (PointerType (StructureType False []) (AddrSpace 0)) [IntegerType 64, ptrI8] False
     , exfun "snprintf" (IntegerType 32) [ptrI8, intPtr, ptrI8] True
@@ -848,10 +846,6 @@ cgConst' (TT.B8  i) = C.Int 8  (fromIntegral i)
 cgConst' (TT.B16 i) = C.Int 16 (fromIntegral i)
 cgConst' (TT.B32 i) = C.Int 32 (fromIntegral i)
 cgConst' (TT.B64 i) = C.Int 64 (fromIntegral i)
--- cgConst' (TT.B8V  v) = C.Vector (map ((C.Int  8) . fromIntegral) . V.toList $ v)
--- cgConst' (TT.B16V v) = C.Vector (map ((C.Int 16) . fromIntegral) . V.toList $ v)
--- cgConst' (TT.B32V v) = C.Vector (map ((C.Int 32) . fromIntegral) . V.toList $ v)
--- cgConst' (TT.B64V v) = C.Vector (map ((C.Int 64) . fromIntegral) . V.toList $ v)
 
 cgConst' (TT.BI i) = C.Array i8 (map (C.Int 8 . fromIntegral . fromEnum) (show i) ++ [C.Int 8 0])
 cgConst' (TT.Fl f) = C.Float (F.Double f)
@@ -930,13 +924,15 @@ ftyToTy :: FType -> Type
 ftyToTy (FArith (ATInt ITNative)) = i32
 ftyToTy (FArith (ATInt ITBig)) = ptr mpzTy
 ftyToTy (FArith (ATInt (ITFixed ty))) = IntegerType (fromIntegral $ nativeTyWidth ty)
--- ftyToTy (FArith (ATInt (ITVec e c)))
---     = VectorType (fromIntegral c) (IntegerType (fromIntegral $ nativeTyWidth e))
 ftyToTy (FArith (ATInt ITChar)) = i32
 ftyToTy (FArith ATFloat) = f64
 ftyToTy FString = ptrI8
 ftyToTy FUnit = VoidType
 ftyToTy FPtr = ptrI8
+ftyToTy FManagedPtr = ptrI8
+ftyToTy FCData = ptrI8
+ftyToTy FFunction = error "hello"
+ftyToTy FFunctionIO = error "hello"
 ftyToTy FAny = valueType
 
 -- Only use when known not to be ITBig
@@ -950,7 +946,6 @@ itConst :: IntTy -> Integer -> C.Constant
 itConst (ITFixed n) x = C.Int (fromIntegral $ nativeTyWidth n) x
 itConst ITNative x = itConst (ITFixed IT32) x
 itConst ITChar x = itConst (ITFixed IT32) x
--- itConst (ITVec elts size) x = C.Vector (replicate size (itConst (ITFixed elts) x))
 
 cgOp :: PrimFn -> [Operand] -> Codegen Operand
 cgOp (LTrunc ITBig ity) [x] = do
@@ -1247,18 +1242,29 @@ cgOp (LExternal pr) [] | pr == sUN "prim__stderr" = do
     i <- inst $ simpleCall "__idris_stdout" []
     box FPtr i
     
-cgOp (LExternal pr) [p] | pr == sUN "prim__asPtr" = return p
+cgOp (LExternal pr) [p] | pr == sUN "prim__asPtr" = do
+    sp <- unbox FManagedPtr p
+    p <- inst $ Load False sp Nothing 0 []
+    box FPtr s
+
 cgOp (LExternal pr) [] | pr == sUN "prim__null" = box FPtr (ConstantOperand $ C.Null ptrI8)
 
 cgOp (LExternal pr) [_] | pr == sUN "prim__vm" = ignore
 cgOp (LExternal pr) [x, y] | pr == sUN "prim__eqPtr" = ptrEq x y
-cgOp (LExternal pr) [x, y] | pr == sUN "prim__eqManagedPtr" = ptrEq x y
+cgOp (LExternal pr) [x, y] | pr == sUN "prim__eqManagedPtr" = do
+    a <- unbox FPtr x
+    b <- unbox FPtr y
+    c <- inst $ Load False a Nothing 0 []
+    d <- inst $ Load False b Nothing 0 []
+    e <- inst $ ICmp IPred.EQ c d []
+    r <- inst $ SExt e i32 []
+    box (FArith (ATInt ITNative)) r
 
 cgOp (LExternal pr) [p, i] | pr == sUN "prim__registerPtr" = do
     l <- unbox (FArith (ATInt ITNative)) i
     sp <- unbox FPtr p
     s <- inst $ simpleCall "__idris_registerPtr" [sp, l]
-    box FPtr s
+    box FManagedPtr s
 
 
 cgOp (LExternal pr) [_, p, o] | pr == sUN "prim__peek8" = peek (FArith (ATInt (ITFixed IT8))) p o
@@ -1293,28 +1299,6 @@ cgOp (LExternal pr) [p, n] | pr == sUN "prim__ptrOffset" = do
 cgOp (LExternal pr) [] | pr == sUN "prim__sizeofPtr" = do
     i <- inst $ simpleCall "__idris_sizeofPtr" []
     box (FArith (ATInt ITNative)) i
-
-
-
-
-
-
--- cgOp (LExternal pk) xs = ignore
-
---  cgOp LStdIn  [] = do
---   stdin <- getStdIn
---   ptr <- inst $ loadInv stdin
---   box FPtr ptr
--- cgOp LStdOut  [] = do
---   stdout <- getStdOut
---   ptr <- inst $ loadInv stdout
---   box FPtr ptr
--- cgOp LStdErr  [] = do
---   stdErr <- getStdErr
---   ptr <- inst $ loadInv stdErr
---   box FPtr ptr
-
--- cgOp LNullPtr [] = box FPtr (ConstantOperand $ C.Null (PointerType (IntegerType 8) (AddrSpace 0)))
 
 cgOp prim args = ierror $ "Unimplemented primitive: <" ++ show prim ++ ">("
                   ++ intersperse ',' (take (length args) ['a'..]) ++ ")"
@@ -1485,7 +1469,7 @@ pokeSingle p o x = do
 
 
 -- Deconstruct the Foreign type in the defunctionalised expression and build
--- a foreign type description for c_irts and irts_c
+-- a foreign type description.
 toAType (FCon i) 
     | i == sUN "C_IntChar" = ATInt ITChar
     | i == sUN "C_IntNative" = ATInt ITNative
