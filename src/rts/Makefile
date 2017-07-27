@@ -1,7 +1,7 @@
 include ../../config.mk
 
 CFLAGS:=-Wextra -fPIC -Wno-unused-parameter $(CFLAGS)
-SOURCES=defs.c getline.c
+SOURCES=defs.c getline.c idris_buffer.c
 OBJECTS=$(SOURCES:.c=.o)
 LIB=libidris_rts.a
 
