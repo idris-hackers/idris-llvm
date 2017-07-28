@@ -1,10 +1,12 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <gmp.h>
+#include <errno.h>
 #include <gc.h>
 #include <string.h>
 #include <inttypes.h>
 #include "getline.h"
+#include "rts.h"
 
 extern char** environ;
 
@@ -14,6 +16,13 @@ void putStr(const char *str) {
 
 void putErr(const char *str) {
   fputs(str, stderr);
+}
+
+// Get zeroed memory
+static void* alloc(size_t s) {
+    void* mem = GC_malloc(s);
+    memset(mem, 0, s);
+    return mem;
 }
 
 void mpz_init_set_ull(mpz_t n, unsigned long long ull)
@@ -97,7 +106,7 @@ int __idris_writeStr(void* h, char* str) {
 }
 
 static void registerPtr_finalizer(void* obj, void* data) {
-    void* p = *obj;
+    void* p = *((void**)obj);
     free(p);
 }
 
@@ -108,7 +117,9 @@ void* __idris_registerPtr(void* p, int size) {
     return mp;
 }
 
-
+void* __idris_getRegisteredPtr(void* rp) {
+    return *((void**)rp);
+}
 
 int __idris_sizeofPtr(void) {
     return sizeof((void*)0);
@@ -208,4 +219,32 @@ int idris_numArgs() {
 
 const char* idris_getArg(int i) {
     return __idris_argv[i];
+}
+
+static struct valTy* mkCon(int32_t tag, int nargs) {
+    int extra = nargs > 1? (nargs - 1)*sizeof(valTy*):0;
+    valTy* space = alloc(sizeof(valTy)+extra);
+    space->tag = tag;
+    return space;
+}
+
+static void addArg(valTy* con, int index, void* arg) {
+    void* first = con->val;
+    *(&first+index) = arg; 
+}
+
+valTy* idris_mkFileError(void* vm) {
+    valTy* out = NULL; 
+    switch (errno) {
+        case ENOENT:
+            out = mkCon(3,0);
+            break;
+        case EAGAIN:
+            out = mkCon(4,0);
+            break;
+        default:
+            out = mkCon(0,1);
+            addArg(out, 0, (void*)errno);
+    }
+    return out;
 }

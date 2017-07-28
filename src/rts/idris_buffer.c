@@ -1,4 +1,5 @@
-#include "idris_rts.h"
+#include <string.h>
+#include <stdio.h>
 #include "idris_buffer.h"
 
 typedef struct {

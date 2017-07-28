@@ -287,6 +287,7 @@ initDefs tgt =
     , exfun "__idris_readChars" ptrI8 [i32, ptrI8] False
     , exfun "__idris_writeStr" i32 [ptrI8, ptrI8] False
     , exfun "__idris_registerPtr" ptrI8 [ptrI8, i32] False
+    , exfun "__idris_getRegisteredPtr" ptrI8 [ptrI8] False
     , exfun "__idris_sizeofPtr" i32 [] False
     , exfun "__idris_stdin" ptrI8 [] False  
     , exfun "__idris_stdout" ptrI8 [] False  
@@ -1244,7 +1245,7 @@ cgOp (LExternal pr) [] | pr == sUN "prim__stderr" = do
     
 cgOp (LExternal pr) [p] | pr == sUN "prim__asPtr" = do
     sp <- unbox FManagedPtr p
-    p <- inst $ Load False sp Nothing 0 []
+    s <- inst $ simpleCall "__idris_getRegisteredPtr" [sp]
     box FPtr s
 
 cgOp (LExternal pr) [] | pr == sUN "prim__null" = box FPtr (ConstantOperand $ C.Null ptrI8)
